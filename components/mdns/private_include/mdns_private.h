@@ -281,6 +281,7 @@ typedef struct mdns_out_question_s {
     const char *service;
     const char *proto;
     const char *domain;
+    const char *subtype;
     bool own_dynamic_memory;
 } mdns_out_question_t;
 
@@ -349,6 +350,7 @@ typedef struct mdns_search_once_s {
     char *instance;
     char *service;
     char *proto;
+    char *subtype;
     mdns_result_t *result;
 } mdns_search_once_t;
 
@@ -360,6 +362,7 @@ typedef struct mdns_browse_s {
 
     char *service;
     char *proto;
+    char *subtype;
     mdns_result_t *result;
 } mdns_browse_t;
 
@@ -409,3 +412,24 @@ typedef struct {
         } browse_send;
     } data;
 } mdns_action_t;
+
+typedef struct mdns_service_cache_s {
+    const char *instance_name;
+    const char *service;
+    const char *proto;
+    mdns_subtype_t *subtype_list;
+    uint16_t priority;
+    uint16_t weight;
+    uint16_t port;
+    mdns_txt_linked_item_t *txt_list;
+    uint32_t ttl;
+    struct mdns_service_cache_s *next;
+} mdns_service_cache_t;
+
+typedef struct mdns_cache_entry_s {
+    const char *hostname;
+    esp_netif_t *esp_netif;
+    mdns_ip_addr_t *addr_list;
+    mdns_service_cache_t *service_cache_list;
+    struct mdns_cache_entry_s *next;
+} mdns_cache_entry_t;

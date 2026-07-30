@@ -1067,6 +1067,19 @@ esp_err_t mdns_netif_action(esp_netif_t *esp_netif, mdns_event_actions_t event_a
 mdns_browse_t *mdns_browse_new(const char *service, const char *proto, mdns_browse_notify_t notifier);
 
 /**
+ * @brief   Browse mDNS for a service subtype `_subtype._sub._service._proto`
+ *          (Selective Instance Enumeration per RFC 6763 Section 7.1).
+ *
+ * @param service  Pointer to the `_service` which will be browsed.
+ * @param proto    Pointer to the `_proto` which will be browsed.
+ * @param subtype  Pointer to the `_subtype` to restrict browsing to. Can be NULL for standard browse.
+ * @param notifier The callback which will be called when the browsing service changed.
+ * @return mdns_browse_t pointer to new browse object if initiated successfully.
+ *         NULL otherwise.
+ */
+mdns_browse_t *mdns_browse_new_with_subtype(const char *service, const char *proto, const char *subtype, mdns_browse_notify_t notifier);
+
+/**
  * @brief   Stop the `_service._proto` browse.
  * @param service  Pointer to the `_service` which will be browsed.
  * @param proto    Pointer to the `_proto` which will be browsed.
@@ -1076,6 +1089,19 @@ mdns_browse_t *mdns_browse_new(const char *service, const char *proto, mdns_brow
  *     - ESP_ERR_NO_MEM         memory error.
  */
 esp_err_t mdns_browse_delete(const char *service, const char *proto);
+
+
+/**
+ * @brief   Stop the `_subtype._sub._service._proto` browse.
+ * @param service  Pointer to the `_service` which will be browsed.
+ * @param proto    Pointer to the `_proto` which will be browsed.
+ * @param subtype  Pointer to the `_subtype`. Can be NULL to match a browse without subtype.
+ * @return
+ *     - ESP_OK                 success.
+ *     - ESP_ERR_FAIL           mDNS is not running or the browsing was never started.
+ *     - ESP_ERR_NO_MEM         memory error.
+ */
+esp_err_t mdns_browse_delete_with_subtype(const char *service, const char *proto, const char *subtype);
 
 #ifdef __cplusplus
 }
