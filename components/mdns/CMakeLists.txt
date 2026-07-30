@@ -13,7 +13,7 @@ endif()
 set(MDNS_MEMORY "mdns_mem_caps.c")
 
 set(MDNS_CORE "mdns_responder.c" "mdns_receive.c" "mdns_utils.c" "mdns_debug.c" "mdns_browser.c" "mdns_send.c" "mdns_netif.c"
-                "mdns_querier.c" "mdns_pcb.c" "mdns_service.c")
+                "mdns_querier.c" "mdns_pcb.c" "mdns_service.c" "mdns_cache.c")
 
 idf_build_get_property(target IDF_TARGET)
 if(${target} STREQUAL "linux")

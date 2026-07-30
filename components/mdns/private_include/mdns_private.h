@@ -189,7 +189,7 @@ typedef struct {
     char proto[MDNS_NAME_BUF_LEN];
     char domain[MDNS_NAME_BUF_LEN];
     uint8_t parts;
-    uint8_t sub;
+    uint8_t sub; // 0: no subtype, 1: subtype
     bool    invalid;
 } mdns_name_t;
 
@@ -281,6 +281,7 @@ typedef struct mdns_out_question_s {
     const char *service;
     const char *proto;
     const char *domain;
+    const char *subtype;
     bool own_dynamic_memory;
 } mdns_out_question_t;
 
@@ -349,6 +350,7 @@ typedef struct mdns_search_once_s {
     char *instance;
     char *service;
     char *proto;
+    char *subtype;
     mdns_result_t *result;
 } mdns_search_once_t;
 
@@ -360,7 +362,7 @@ typedef struct mdns_browse_s {
 
     char *service;
     char *proto;
-    mdns_result_t *result;
+    char *subtype;
 } mdns_browse_t;
 
 typedef struct mdns_browse_result_sync_t {
@@ -409,3 +411,87 @@ typedef struct {
         } browse_send;
     } data;
 } mdns_action_t;
+
+typedef enum {
+    MDNS_CACHE_CONSUMER_BROWSE     = (1U << 0),
+    MDNS_CACHE_CONSUMER_RESOLVER   = (1U << 1)
+} mdns_cache_consumer_type_t;
+
+typedef enum {
+    MDNS_CACHE_RECORD_PTR       = (1U << 0),
+    MDNS_CACHE_RECORD_SUBTYPE   = (1U << 1),
+    MDNS_CACHE_RECORD_SRV       = (1U << 2),
+    MDNS_CACHE_RECORD_TXT       = (1U << 3),
+    MDNS_CACHE_RECORD_ADDR      = (1U << 4)
+} mdns_cache_record_type_t;
+
+/**
+ * @brief   mDNS cache PTR subtype structure
+ */
+typedef struct mdns_cache_subtype_s {
+    char *subtype;
+    uint32_t ttl;
+    struct mdns_cache_subtype_s *next;
+} mdns_cache_subtype_t;
+
+/**
+ * @brief   mDNS cache ADDR list structure
+ */
+typedef struct mdns_cache_addr_s {
+    esp_ip_addr_t addr;
+    uint32_t ttl;
+    struct mdns_cache_addr_s *next;
+} mdns_cache_addr_t;
+
+/**
+ * @brief   mDNS cache service structure, contains PTR (with subtype list), SRV and TXT records
+ */
+typedef struct mdns_service_cache_s {
+    char *instance_name;
+    char *service;
+    char *proto;
+    // PTR
+    bool ptr_present;   /*!< true if PTR record is present */
+    uint32_t ptr_ttl;
+    // Subtype list
+    mdns_cache_subtype_t *subtype_list;
+    // SRV
+    bool srv_present;   /*!< true if SRV record is present */
+    uint16_t priority;
+    uint16_t weight;
+    uint16_t port;
+    uint32_t srv_ttl;
+    // TXT
+    bool txt_present;   /*!< true if TXT record is present */
+    mdns_txt_linked_item_t *txt_list;
+    uint32_t txt_ttl;
+    // Dirty flags
+    uint8_t dirty_records;   /*!< bitmask of dirty records, see @ref mdns_cache_dirty_record_type_t */
+    uint8_t dirty_consumers; /*!< bitmask of dirty consumers, see @ref mdns_cache_dirty_consumer_t */
+    struct mdns_service_cache_s *next;
+} mdns_service_cache_t;
+
+/**
+ * @brief   mDNS cache entry structure, contains hostname, IP address list and service cache list
+ */
+typedef struct mdns_cache_entry_s {
+    char *hostname;
+    esp_netif_t *esp_netif;
+    mdns_ip_protocol_t ip_protocol;
+
+    mdns_cache_addr_t *addr_list;
+    bool addr_list_dirty; /*!< true if the address list is dirty, reserved for host-level ADDR resolvers */
+    mdns_service_cache_t *service_cache_list;
+    struct mdns_cache_entry_s *next;
+} mdns_cache_entry_t;
+
+/**
+ * @brief   mDNS cache update result structure
+ */
+typedef enum {
+    MDNS_CACHE_NO_CHANGE,   /*!< no change to the cache */
+    MDNS_CACHE_ADDED,       /*!< new `mdns_cache_entry_t` appended to the cache */
+    MDNS_CACHE_UPDATED,     /*!< existing cache entry updated */
+    MDNS_CACHE_REMOVED,     /*!< existing cache entry removed */
+    MDNS_CACHE_ERROR,       /*!< error occurred while updating the cache */
+} mdns_cache_update_result_t;

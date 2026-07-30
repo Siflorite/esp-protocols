@@ -19,6 +19,7 @@
 #include "mdns_querier.h"
 #include "mdns_pcb.h"
 #include "mdns_responder.h"
+#include "mdns_cache.h"
 
 static const char *TAG = "mdns_receive";
 
@@ -285,7 +286,7 @@ static void result_txt_create(const uint8_t *data, size_t len, mdns_txt_item_t *
 
         int new_value_len = part_len - name_len - 1;
         if (new_value_len > 0) {
-            char *value = (char *) mdns_mem_malloc(new_value_len + 1);
+            char *value = (char *)mdns_mem_malloc(new_value_len + 1);
             if (!value) {
                 HOOK_MALLOC_FAILED;
                 goto handle_error;//error
@@ -313,6 +314,90 @@ handle_error :
     }
     mdns_mem_free(txt_value_len);
     mdns_mem_free(txt);
+}
+
+static void free_txt_linked_list(mdns_txt_linked_item_t *txt)
+{
+    while (txt) {
+        mdns_txt_linked_item_t *next = txt->next;
+        mdns_mem_free((char *)txt->key);
+        mdns_mem_free(txt->value);
+        mdns_mem_free(txt);
+        txt = next;
+    }
+}
+
+static bool result_txt_linked_list_create(const uint8_t *data, size_t len, mdns_txt_linked_item_t **out_txt)
+{
+    *out_txt = NULL;
+    mdns_txt_linked_item_t *txt_linked_list = NULL;
+    mdns_txt_linked_item_t **txt_ptr = &txt_linked_list;
+    uint16_t data_index = 0;
+    int txt_num = 0;
+    int num_items = get_txt_items_count(data, len);
+    if (num_items < 0 || num_items > SIZE_MAX / sizeof(mdns_txt_item_t)) {
+        // Error: num_items is incorrect (or too large to allocate)
+        return false;
+    }
+    if (num_items == 0) {
+        // Empty TXT, no need to allocate
+        return true;
+    }
+
+    while (data_index < len && txt_num < num_items) {
+        uint8_t item_len = data[data_index++];
+        if (item_len == 0) {
+            break;
+        }
+        if ((data_index + item_len) > len) {
+            goto error;
+        }
+
+        int key_len = get_txt_item_len(data + data_index, item_len);
+        if (key_len < 0) {
+            // Invalid item with no key
+            data_index += item_len;
+            continue;
+        }
+
+        *txt_ptr = (mdns_txt_linked_item_t *)mdns_mem_calloc(1, sizeof(mdns_txt_linked_item_t));
+        if (!*txt_ptr) {
+            HOOK_MALLOC_FAILED;
+            goto error;
+        }
+
+        (*txt_ptr)->key = mdns_mem_strndup((const char *)(data + data_index), key_len);
+        if (!(*txt_ptr)->key) {
+            HOOK_MALLOC_FAILED;
+            goto error;
+        }
+        txt_num++;
+        // Skips '=' only if presents
+        data_index += key_len + ((key_len < item_len) ? 1 : 0);
+
+        uint8_t value_len = item_len > (key_len + 1) ? item_len - key_len - 1 : 0;
+        (*txt_ptr)->value_len = value_len;
+        if (value_len > 0) {
+            (*txt_ptr)->value = (char *)mdns_mem_calloc(value_len + 1, sizeof(char));
+            if (!(*txt_ptr)->value) {
+                HOOK_MALLOC_FAILED;
+                goto error;
+            }
+            memcpy((*txt_ptr)->value, data + data_index, value_len);
+            data_index += value_len;
+        } else {
+            (*txt_ptr)->value = NULL;
+        }
+
+        txt_ptr = &(*txt_ptr)->next;
+    }
+
+    *out_txt = txt_linked_list;
+    return true;
+
+error:
+    free_txt_linked_list(txt_linked_list);
+    return false;
 }
 
 #ifdef CONFIG_LWIP_IPV4
@@ -598,19 +683,11 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
     bool do_not_reply = false;
     mdns_search_once_t *search_result = NULL;
     mdns_browse_t *browse_result = NULL;
-    /*
-     * Browse packet limitations (see also mdns_browse_new() / mdns_browse_notify_t in mdns.h):
-     * - Only one active browse is tracked per incoming packet; if a packet answers
-     *   two different browsed service types, only the last match gets staged A/AAAA.
-     * - Staged A/AAAA are applied via mdns_priv_browse_result_add_ip(), which sets
-     *   addresses on the first browse result per target hostname only.
-     */
+
     mdns_browse_t *packet_browse = NULL;
     char *browse_result_instance = NULL;
     char *browse_result_service = NULL;
     char *browse_result_proto = NULL;
-    mdns_browse_sync_t *out_sync_browse = NULL;
-    mdns_browse_staged_ip_t *staged_browse_ips = NULL;
 
     DBG_RX_PACKET(packet, data, len);
 
@@ -820,10 +897,7 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
                 browse_result = mdns_priv_browse_find(name, type, packet->tcpip_if, packet->ip_protocol);
                 if (browse_result) {
                     packet_browse = browse_result;
-                    out_sync_browse = mdns_priv_browse_ensure_sync(browse_result, out_sync_browse);
-                    if (!out_sync_browse) {
-                        goto clear_rx_packet;
-                    }
+
                     if (!browse_result_service) {
                         browse_result_service = (char *)mdns_mem_malloc(MDNS_NAME_BUF_LEN);
                         if (!browse_result_service) {
@@ -863,13 +937,9 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
                 }
                 if (browse_for_ptr) {
                     packet_browse = browse_for_ptr;
-                    out_sync_browse = mdns_priv_browse_ensure_sync(browse_for_ptr, out_sync_browse);
-                    if (!out_sync_browse) {
-                        goto clear_rx_packet;
-                    }
-                    mdns_priv_browse_result_add_ptr(browse_for_ptr, name->host, browse_for_ptr->service,
-                                                    browse_for_ptr->proto, packet->tcpip_if, packet->ip_protocol,
-                                                    ttl, out_sync_browse);
+                    (void)mdns_priv_cache_update_ptr(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol,
+                                                     name->host, browse_for_ptr->service, browse_for_ptr->proto,
+                                                     browse_for_ptr->subtype, ttl);
                 } else if (search_result) {
                     mdns_priv_query_result_add_ptr(search_result, name->host, name->service, name->proto,
                                                    packet->tcpip_if, packet->ip_protocol, ttl);
@@ -964,11 +1034,9 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
                 if (browse_result && !mdns_utils_str_null_or_empty(browse_result_instance)
                         && !mdns_utils_str_null_or_empty(browse_result_service)
                         && !mdns_utils_str_null_or_empty(browse_result_proto)) {
-                    mdns_priv_browse_result_add_srv(browse_result, name->host, browse_result_instance,
-                                                    browse_result_service,
-                                                    browse_result_proto, port, packet->tcpip_if, packet->ip_protocol,
-                                                    ttl,
-                                                    out_sync_browse);
+                    (void)mdns_priv_cache_update_srv(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol,
+                                                     name->host, browse_result_instance, browse_result_service,
+                                                     browse_result_proto, priority, weight, port, ttl);
                 }
                 if (search_result) {
                     if (search_result->type == MDNS_TYPE_PTR) {
@@ -1039,17 +1107,19 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
                 mdns_txt_item_t *txt = NULL;
                 uint8_t *txt_value_len = NULL;
                 size_t txt_count = 0;
+                mdns_txt_linked_item_t *txt_linked_list = NULL;
 
                 mdns_result_t *result = NULL;
                 if (browse_result && !mdns_utils_str_null_or_empty(browse_result_instance)
                         && !mdns_utils_str_null_or_empty(browse_result_service)
                         && !mdns_utils_str_null_or_empty(browse_result_proto)) {
-                    result_txt_create(data_ptr, data_len, &txt, &txt_value_len, &txt_count);
-                    mdns_priv_browse_result_add_txt(browse_result, browse_result_instance, browse_result_service,
-                                                    browse_result_proto,
-                                                    txt, txt_value_len, txt_count, packet->tcpip_if,
-                                                    packet->ip_protocol,
-                                                    ttl, out_sync_browse);
+
+                    if (result_txt_linked_list_create(data_ptr, data_len, &txt_linked_list)) {
+                        (void)mdns_priv_cache_update_txt(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol,
+                                                         browse_result_instance, browse_result_service, browse_result_proto, txt_linked_list, ttl);
+                        txt_linked_list = NULL;
+                    }
+
                 }
                 if (search_result) {
                     if (search_result->type == MDNS_TYPE_PTR) {
@@ -1121,12 +1191,8 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
                 ip6.type = ESP_IPADDR_TYPE_V6;
                 memcpy(ip6.u_addr.ip6.addr, data_ptr, MDNS_ANSWER_AAAA_SIZE);
                 if (packet_browse || browse_result) {
-                    mdns_browse_t *browse_ip = browse_result ? browse_result : packet_browse;
-                    out_sync_browse = mdns_priv_browse_ensure_sync(browse_ip, out_sync_browse);
-                    if (out_sync_browse && mdns_priv_browse_stage_ip(&staged_browse_ips, name->host, &ip6,
-                                                                     packet->tcpip_if, packet->ip_protocol, ttl) != ESP_OK) {
-                        goto clear_rx_packet;
-                    }
+                    (void)mdns_priv_cache_update_addr(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol,
+                                                      name->host, &ip6, ttl);
                 }
                 if (search_result) {
                     //check for more applicable searches (PTR & A/AAAA at the same time)
@@ -1187,12 +1253,8 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
                 ip.type = ESP_IPADDR_TYPE_V4;
                 memcpy(&(ip.u_addr.ip4.addr), data_ptr, 4);
                 if (packet_browse || browse_result) {
-                    mdns_browse_t *browse_ip = browse_result ? browse_result : packet_browse;
-                    out_sync_browse = mdns_priv_browse_ensure_sync(browse_ip, out_sync_browse);
-                    if (out_sync_browse && mdns_priv_browse_stage_ip(&staged_browse_ips, name->host, &ip,
-                                                                     packet->tcpip_if, packet->ip_protocol, ttl) != ESP_OK) {
-                        goto clear_rx_packet;
-                    }
+                    (void)mdns_priv_cache_update_addr(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol,
+                                                      name->host, &ip, ttl);
                 }
                 if (search_result) {
                     //check for more applicable searches (PTR & A/AAAA at the same time)
@@ -1251,38 +1313,12 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
         }
     }
 
-    if (staged_browse_ips) {
-        mdns_browse_t *browse_apply = packet_browse;
-        if (!browse_apply && out_sync_browse) {
-            browse_apply = out_sync_browse->browse;
-        }
-        out_sync_browse = mdns_priv_browse_ensure_sync(browse_apply, out_sync_browse);
-        if (browse_apply && out_sync_browse) {
-            mdns_priv_browse_apply_staged_ips(browse_apply, staged_browse_ips, out_sync_browse);
-        }
-    }
-    mdns_priv_browse_staged_ip_free(staged_browse_ips);
-    staged_browse_ips = NULL;
-
     if (!do_not_reply && mdns_priv_pcb_is_after_probing(packet) && (parsed_packet->questions || parsed_packet->discovery)) {
         mdns_priv_create_answer_from_parsed_packet(parsed_packet);
     }
-    if (out_sync_browse) {
-        DBG_BROWSE_RESULTS_WITH_MSG(out_sync_browse->browse->result,
-                                    "Browse %s%s total result:", out_sync_browse->browse->service, out_sync_browse->browse->proto);
-        if (out_sync_browse->sync_result) {
-            DBG_BROWSE_RESULTS_WITH_MSG(out_sync_browse->sync_result->result,
-                                        "Changed result:");
-            mdns_priv_browse_sync(out_sync_browse);
-        } else {
-            mdns_mem_free(out_sync_browse);
-        }
-        out_sync_browse = NULL;
-    }
 
 clear_rx_packet:
-    mdns_priv_browse_staged_ip_free(staged_browse_ips);
-    staged_browse_ips = NULL;
+    mdns_priv_cache_process_dirty();
     while (parsed_packet->questions) {
         mdns_parsed_question_t *question = parsed_packet->questions;
         parsed_packet->questions = parsed_packet->questions->next;
@@ -1319,7 +1355,6 @@ clear_rx_packet:
     mdns_mem_free(browse_result_instance);
     mdns_mem_free(browse_result_service);
     mdns_mem_free(browse_result_proto);
-    mdns_priv_browse_sync_free(out_sync_browse);
 }
 
 void mdns_priv_receive_action(mdns_action_t *action, mdns_action_subtype_t type)

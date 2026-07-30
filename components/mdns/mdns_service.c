@@ -21,6 +21,7 @@
 #include "mdns_querier.h"
 #include "mdns_pcb.h"
 #include "mdns_responder.h"
+#include "mdns_cache.h"
 
 #define MDNS_SERVICE_STACK_DEPTH    CONFIG_MDNS_TASK_STACK_SIZE
 #define MDNS_TASK_PRIORITY          CONFIG_MDNS_TASK_PRIORITY
@@ -415,6 +416,7 @@ void mdns_free(void)
     mdns_priv_clear_tx_queue();
     mdns_priv_query_free();
     mdns_priv_browse_free();
+    mdns_priv_cache_clear();
     mdns_priv_responder_free();
 }
 
