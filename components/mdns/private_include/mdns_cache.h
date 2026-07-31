@@ -12,13 +12,15 @@
 extern "C" {
 #endif
 
-mdns_cache_entry_t *mdns_priv_cache_find_entry(const char *hostname, const esp_netif_t *esp_netif);
-mdns_service_cache_t *mdns_priv_cache_find_service(const esp_netif_t *esp_netif, const char *instance, const char *service, const char *proto);
+mdns_cache_entry_t *mdns_priv_cache_find_entry(const char *hostname, const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol);
+mdns_service_cache_t *mdns_priv_cache_find_service(const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol, const char *instance, const char *service, const char *proto, mdns_cache_entry_t **owner_entry);
 
-mdns_cache_entry_t *mdns_priv_cache_add_entry(const char *hostname, const esp_netif_t *esp_netif);
-mdns_service_cache_t *mdns_priv_cache_add_service(mdns_cache_entry_t *entry, const char *instance, const char *service, const char *proto);
+mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol, const char *instance, const char *service, const char *proto, const char *subtype, uint32_t ttl);
+mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol, const char *hostname, const char *instance, const char *service, const char *proto, uint16_t priority, uint16_t weight, uint16_t port, uint32_t ttl);
+mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol, const char *instance, const char *service, const char *proto, mdns_txt_linked_item_t *txt, uint32_t ttl);
+mdns_cache_update_result_t mdns_priv_cache_update_addr(const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol, const char *hostname, const esp_ip_addr_t *addr, uint32_t ttl);
 
-esp_err_t mdns_priv_cache_update_ptr(mdns_service_cache_t *cache, const char *instance, const char *service, const char *proto);
+void mdns_priv_cache_clear(void);
 #ifdef __cplusplus
 }
 #endif

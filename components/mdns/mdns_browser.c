@@ -255,7 +255,11 @@ mdns_browse_t *mdns_priv_browse_find_ptr(mdns_name_t *name)
     }
 
     while (b) {
-        if (!strcasecmp(name->service, b->service) && !strcasecmp(name->proto, b->proto)) {
+        bool browse_has_subtype = !mdns_utils_str_null_or_empty(b->subtype);
+        bool subtype_matches = name->sub ? browse_has_subtype && !mdns_utils_str_null_or_empty(name->host)
+                               && !strcasecmp(name->host, b->subtype) : !browse_has_subtype;
+
+        if (!strcasecmp(name->service, b->service) && !strcasecmp(name->proto, b->proto) && subtype_matches) {
             return b;
         }
         b = b->next;

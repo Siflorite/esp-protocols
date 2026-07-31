@@ -29,7 +29,7 @@ void mdns_priv_browse_free(void);
 mdns_browse_t *mdns_priv_browse_find(mdns_name_t *name, uint16_t type, mdns_if_t tcpip_if, mdns_ip_protocol_t ip_protocol);
 
 /**
- * @brief Looks for an active browse matching a PTR owner name (service._proto.local)
+ * @brief Looks for an active browse matching a PTR owner name (service._proto.local, or with subtype _subtype._sub.service._proto.local)
  *
  * @note Called from the packet parser (mdns_receive.c)
  */

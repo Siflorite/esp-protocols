@@ -189,7 +189,7 @@ typedef struct {
     char proto[MDNS_NAME_BUF_LEN];
     char domain[MDNS_NAME_BUF_LEN];
     uint8_t parts;
-    uint8_t sub;
+    uint8_t sub; // 0: no subtype, 1: subtype
     bool    invalid;
 } mdns_name_t;
 
@@ -414,9 +414,9 @@ typedef struct {
 } mdns_action_t;
 
 typedef struct mdns_service_cache_s {
-    const char *instance_name;
-    const char *service;
-    const char *proto;
+    char *instance_name;
+    char *service;
+    char *proto;
     mdns_subtype_t *subtype_list;
     uint16_t priority;
     uint16_t weight;
@@ -427,9 +427,18 @@ typedef struct mdns_service_cache_s {
 } mdns_service_cache_t;
 
 typedef struct mdns_cache_entry_s {
-    const char *hostname;
+    char *hostname;
     esp_netif_t *esp_netif;
+    mdns_ip_protocol_t ip_protocol;
     mdns_ip_addr_t *addr_list;
     mdns_service_cache_t *service_cache_list;
     struct mdns_cache_entry_s *next;
 } mdns_cache_entry_t;
+
+typedef enum {
+    MDNS_CACHE_NO_CHANGE,
+    MDNS_CACHE_ADDED,
+    MDNS_CACHE_UPDATED,
+    MDNS_CACHE_REMOVED,
+    MDNS_CACHE_ERROR,
+} mdns_cache_update_result_t;
