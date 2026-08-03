@@ -21,6 +21,13 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
 mdns_cache_update_result_t mdns_priv_cache_update_addr(const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol, const char *hostname, const esp_ip_addr_t *addr, uint32_t ttl);
 
 void mdns_priv_cache_clear(void);
+
+mdns_result_t *mdns_priv_cache_to_result(const mdns_browse_t *browse);
+void mdns_priv_cache_verify_browse_result(const mdns_browse_t *browse);
 #ifdef __cplusplus
 }
+#endif
+
+#ifndef CONFIG_MDNS_CACHE_DEBUG
+#define CONFIG_MDNS_CACHE_DEBUG 1
 #endif

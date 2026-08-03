@@ -1369,6 +1369,8 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
         mdns_priv_create_answer_from_parsed_packet(parsed_packet);
     }
     if (out_sync_browse) {
+        mdns_priv_cache_verify_browse_result(out_sync_browse->browse);
+
         DBG_BROWSE_RESULTS_WITH_MSG(out_sync_browse->browse->result,
                                     "Browse %s%s total result:", out_sync_browse->browse->service, out_sync_browse->browse->proto);
         if (out_sync_browse->sync_result) {
