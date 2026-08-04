@@ -139,6 +139,20 @@ void mdns_priv_browse_result_add_ip(mdns_browse_t *browse, const char *hostname,
  */
 void mdns_priv_browse_result_add_srv(mdns_browse_t *browse, const char *hostname, const char *instance, const char *service, const char *proto,
                                      uint16_t port, mdns_if_t tcpip_if, mdns_ip_protocol_t ip_protocol, uint32_t ttl, mdns_browse_sync_t *out_sync_browse);
+
+/**
+ * @brief  Update the result components of browsers from dirty service cache
+ *
+ * @note Called from mdns_priv_cache_process_dirty() in mdns_cache.c
+ */
+bool mdns_priv_browse_update_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service);
+
+/**
+ * @brief  Removes a browser result with corresponding service cache entry and subtype
+ *
+ * @note Called from TTL=0 event handlers in mdns_cache.c
+ */
+void mdns_priv_browse_remove_result_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service, const char *subtype);
 #ifdef __cplusplus
 }
 #endif

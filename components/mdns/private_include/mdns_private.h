@@ -423,6 +423,7 @@ typedef struct mdns_service_cache_s {
     uint16_t port;
     mdns_txt_linked_item_t *txt_list;
     uint32_t ttl;
+    bool dirty;
     struct mdns_service_cache_s *next;
 } mdns_service_cache_t;
 

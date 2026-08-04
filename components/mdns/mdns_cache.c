@@ -4,7 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include <strings.h>
+#include "esp_check.h"
 #include "esp_log.h"
+#include "mdns_browser.h"
 #include "mdns_cache.h"
 #include "mdns_mem_caps.h"
 #include "mdns_querier.h"
@@ -134,6 +136,13 @@ static void cache_finish_update(const char *record_type, mdns_cache_update_resul
 #endif
 }
 
+static void service_cache_mark_dirty(mdns_service_cache_t *service_entry, mdns_cache_update_result_t result)
+{
+    if (service_entry && (result == MDNS_CACHE_ADDED || result == MDNS_CACHE_UPDATED)) {
+        service_entry->dirty = true;
+    }
+}
+
 mdns_cache_entry_t *mdns_priv_cache_find_entry(const char *hostname, const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol)
 {
     mdns_cache_entry_t *entry = s_cache;
@@ -169,6 +178,22 @@ mdns_service_cache_t *mdns_priv_cache_find_service(const esp_netif_t *esp_netif,
         entry = entry->next;
     }
     return NULL;
+}
+
+bool mdns_priv_host_has_service(const char *hostname, const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol, const char *service, const char *proto)
+{
+    mdns_cache_entry_t *entry = mdns_priv_cache_find_entry(hostname, esp_netif, ip_protocol);
+    if (!entry) {
+        return false;
+    }
+
+    for (const mdns_service_cache_t *service_entry = entry->service_cache_list; service_entry; service_entry = service_entry->next) {
+        if (names_equal(service_entry->service, service) && names_equal(service_entry->proto, proto)) {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static void service_entry_free(mdns_service_cache_t *service_entry)
@@ -400,6 +425,46 @@ static bool cache_remove_service(mdns_cache_entry_t *entry, mdns_service_cache_t
     return false;
 }
 
+void mdns_priv_remove_service_caches(const char *service, const char *proto)
+{
+    mdns_cache_entry_t **entry_ptr = &s_cache;
+
+    while (*entry_ptr) {
+        mdns_cache_entry_t *entry = *entry_ptr;
+        mdns_service_cache_t **service_ptr = &entry->service_cache_list;
+
+        while (*service_ptr) {
+            mdns_service_cache_t *cache = *service_ptr;
+            if (names_equal(cache->service, service) && names_equal(cache->proto, proto)) {
+                *service_ptr = cache->next;
+                service_entry_free(cache);
+                continue;
+            }
+            service_ptr = &(*service_ptr)->next;
+        }
+
+        if (cache_remove_entry_if_empty(entry)) {
+            continue;
+        }
+        entry_ptr = &(*entry_ptr)->next;
+    }
+}
+
+void mdns_priv_service_cache_remove_subtype(const char *service, const char *proto, const char *subtype)
+{
+    if (mdns_utils_str_null_or_empty(service) || mdns_utils_str_null_or_empty(proto) || mdns_utils_str_null_or_empty(subtype)) {
+        return;
+    }
+
+    for (mdns_cache_entry_t *entry = s_cache; entry; entry = entry->next) {
+        for (mdns_service_cache_t *it = entry->service_cache_list; it; it = it->next) {
+            if (names_equal(it->service, service) && names_equal(it->proto, proto)) {
+                (void)service_cache_remove_subtype(it, subtype);
+            }
+        }
+    }
+}
+
 mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol, const char *instance, const char *service, const char *proto, const char *subtype, uint32_t ttl)
 {
     mdns_cache_entry_t *owner_entry = NULL;
@@ -413,9 +478,14 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
         }
 
         if (!mdns_utils_str_null_or_empty(subtype)) {
-            return service_cache_remove_subtype(service_entry, subtype) ? MDNS_CACHE_UPDATED : MDNS_CACHE_NO_CHANGE;
+            bool subtype_removed = service_cache_remove_subtype(service_entry, subtype);
+            if (subtype_removed) {
+                mdns_priv_browse_remove_result_from_service_cache(owner_entry, service_entry, subtype);
+            }
+            return subtype_removed ? MDNS_CACHE_UPDATED : MDNS_CACHE_NO_CHANGE;
         }
 
+        mdns_priv_browse_remove_result_from_service_cache(owner_entry, service_entry, NULL);
         return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
     }
 
@@ -447,6 +517,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
         result = MDNS_CACHE_UPDATED;
     }
 
+    service_cache_mark_dirty(service_entry, result);
     cache_finish_update("PTR", result);
     return result;
 }
@@ -484,6 +555,9 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
     mdns_cache_update_result_t result = MDNS_CACHE_NO_CHANGE;
 
     if (ttl == 0) {
+        if (service_entry) {
+            mdns_priv_browse_remove_result_from_service_cache(owner_entry, service_entry, NULL);
+        }
         return service_entry && cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
     }
 
@@ -516,6 +590,8 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
     } else if (moved) {
         result = MDNS_CACHE_UPDATED;
     }
+
+    service_cache_mark_dirty(service_entry, result);
     cache_finish_update("SRV", result);
     return result;
 }
@@ -621,6 +697,9 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
 
     if (ttl == 0) {
         free_txt_linked_list(txt);
+        if (service_entry) {
+            mdns_priv_browse_remove_result_from_service_cache(owner_entry, service_entry, NULL);
+        }
         return service_entry && cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
     }
 
@@ -649,6 +728,8 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
     } else if (ttl_changed) {
         result = MDNS_CACHE_UPDATED;
     }
+
+    service_cache_mark_dirty(service_entry, result);
     cache_finish_update("TXT", result);
     return result;
 }
@@ -713,6 +794,10 @@ mdns_cache_update_result_t mdns_priv_cache_update_addr(const esp_netif_t *esp_ne
     }
 
     result = (addr_added || ttl_changed) ? MDNS_CACHE_UPDATED : MDNS_CACHE_NO_CHANGE;
+    for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
+        service_cache_mark_dirty(service, result);
+    }
+
     cache_finish_update("ADDR", result);
     return result;
 }
@@ -749,8 +834,10 @@ static bool service_cache_matches_browse(const mdns_service_cache_t *service, co
     return service_cache_has_subtype(service, browse->subtype);
 }
 
-static mdns_txt_item_t *project_txt(const mdns_txt_linked_item_t *txt_list, uint8_t **out_value_len, size_t *out_count)
+static bool project_txt(const mdns_txt_linked_item_t *txt_list, mdns_txt_item_t **out_txt, uint8_t **out_value_len, size_t *out_count)
 {
+    esp_err_t __attribute__((unused))ret = ESP_OK;
+    *out_txt = NULL;
     *out_value_len = NULL;
     *out_count = 0;
 
@@ -759,55 +846,60 @@ static mdns_txt_item_t *project_txt(const mdns_txt_linked_item_t *txt_list, uint
         count++;
     }
     if (count == 0) {
-        return NULL;
+        return true;
     }
 
     mdns_txt_item_t *txt_items = mdns_mem_calloc(count, sizeof(mdns_txt_item_t));
     if (!txt_items) {
         HOOK_MALLOC_FAILED;
-        return NULL;
+        return false;
     }
     uint8_t *value_len = mdns_mem_calloc(count, sizeof(uint8_t));
     if (!value_len) {
         HOOK_MALLOC_FAILED;
         mdns_mem_free(txt_items);
-        return NULL;
+        return false;
     }
 
     size_t i = 0;
     for (const mdns_txt_linked_item_t *txt = txt_list; txt; txt = txt->next, i++) {
         txt_items[i].key = mdns_mem_strdup(txt->key);
+        ESP_GOTO_ON_FALSE(txt_items[i].key, ESP_ERR_NO_MEM, error, TAG, "Failed to allocate key");
 
         value_len[i] = txt->value_len;
-        if (txt->value_len > 0 && txt->value) {
-            char *value = mdns_mem_calloc(txt->value_len + 1, sizeof(char));
-            if (!value || ! txt_items[i].key) {
-                HOOK_MALLOC_FAILED;
-                for (size_t j = 0; j <= i; j++) {
-                    mdns_mem_free((char *)txt_items[j].key);
-                    mdns_mem_free((char *)txt_items[j].value);
-                }
-                mdns_mem_free(value_len);
-                mdns_mem_free(txt_items);
-                return NULL;
-            }
-
-            memcpy(value, txt->value, txt->value_len);
-            txt_items[i].value = value;
-        } else {
-            txt_items[i].value = NULL;
+        if (txt->value_len == 0) {
+            continue;
         }
+        ESP_GOTO_ON_FALSE(txt->value, ESP_ERR_INVALID_ARG, cleanup, TAG, "Invalid value");
+
+        txt_items[i].value = mdns_mem_calloc(txt->value_len + 1, sizeof(char));
+        ESP_GOTO_ON_FALSE(txt_items[i].value, ESP_ERR_NO_MEM, error, TAG, "Failed to allocate value");
+        memcpy((char *)txt_items[i].value, txt->value, txt->value_len);
     }
 
     *out_value_len = value_len;
     *out_count = count;
-    return txt_items;
+    *out_txt = txt_items;
+    return true;
+
+error:
+    HOOK_MALLOC_FAILED;
+cleanup:
+    for (size_t i = 0; i < count; i++) {
+        mdns_mem_free((char *)txt_items[i].key);
+        mdns_mem_free((char *)txt_items[i].value);
+    }
+    mdns_mem_free(value_len);
+    mdns_mem_free(txt_items);
+    return false;
 }
 
-static mdns_ip_addr_t *project_addr(const mdns_ip_addr_t *addr_list)
+static bool project_addr(const mdns_ip_addr_t *addr_list, mdns_ip_addr_t **out_addr_list)
 {
     mdns_ip_addr_t *head = NULL;
     mdns_ip_addr_t **tail = &head;
+
+    *out_addr_list = NULL;
 
     for (const mdns_ip_addr_t *addr = addr_list; addr; addr = addr->next) {
         mdns_ip_addr_t *new_addr = mdns_mem_calloc(1, sizeof(mdns_ip_addr_t));
@@ -818,43 +910,63 @@ static mdns_ip_addr_t *project_addr(const mdns_ip_addr_t *addr_list)
                 mdns_mem_free(head);
                 head = next;
             }
-            return NULL;
+            return false;
         }
         new_addr->addr = addr->addr;
         *tail = new_addr;
         tail = &new_addr->next;
     }
 
-    return head;
+    *out_addr_list = head;
+    return true;
 }
 
-static mdns_result_t *service_cache_to_result(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service)
+mdns_result_t *mdns_priv_service_cache_to_result(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service)
 {
+    esp_err_t __attribute__((unused))ret = ESP_OK;
     mdns_result_t *result = mdns_mem_calloc(1, sizeof(mdns_result_t));
-    if (!result) {
-        HOOK_MALLOC_FAILED;
-        return NULL;
-    }
+    ESP_GOTO_ON_FALSE(result, ESP_ERR_NO_MEM, error, TAG, "Failed to allocate result");
 
     result->esp_netif = entry->esp_netif;
     result->ttl = service->ttl;
     result->ip_protocol = entry->ip_protocol;
+
     result->instance_name = mdns_mem_strdup(service->instance_name);
+    ESP_GOTO_ON_FALSE(result->instance_name, ESP_ERR_NO_MEM, error, TAG, "Failed to allocate instance name");
     result->service_type = mdns_mem_strdup(service->service);
+    ESP_GOTO_ON_FALSE(result->service_type, ESP_ERR_NO_MEM, error, TAG, "Failed to allocate service type");
     result->proto = mdns_mem_strdup(service->proto);
+    ESP_GOTO_ON_FALSE(result->proto, ESP_ERR_NO_MEM, error, TAG, "Failed to allocate protocol");
     if (entry->hostname) {
         result->hostname = mdns_mem_strdup(entry->hostname);
+        ESP_GOTO_ON_FALSE(result->hostname, ESP_ERR_NO_MEM, error, TAG, "Failed to allocate hostname");
     }
-    result->port = service->port;
-    result->txt = project_txt(service->txt_list, &result->txt_value_len, &result->txt_count);
-    result->addr = project_addr(entry->addr_list);
 
-    if (!result->instance_name || !result->service_type || !result->proto || (entry->hostname && !result->hostname) || !result->txt || !result->addr) {
-        HOOK_MALLOC_FAILED;
-        mdns_priv_query_results_free(result);
-    }
+    result->port = service->port;
+    ESP_GOTO_ON_FALSE(project_txt(service->txt_list, &result->txt, &result->txt_value_len, &result->txt_count), ESP_ERR_NO_MEM, error, TAG, "Failed to project TXT");
+    ESP_GOTO_ON_FALSE(project_addr(entry->addr_list, &result->addr), ESP_ERR_NO_MEM, error, TAG, "Failed to project address list");
 
     return result;
+
+error:
+    HOOK_MALLOC_FAILED;
+    mdns_priv_query_results_free(result);
+    return NULL;
+}
+
+void mdns_priv_cache_process_dirty(void)
+{
+    for (mdns_cache_entry_t *entry = s_cache; entry; entry = entry->next) {
+        for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
+            if (!service->dirty) {
+                continue;
+            }
+
+            if (mdns_priv_browse_update_from_service_cache(entry, service)) {
+                service->dirty = false;
+            }
+        }
+    }
 }
 
 mdns_result_t *mdns_priv_cache_to_result(const mdns_browse_t *browse)
@@ -870,10 +982,10 @@ mdns_result_t *mdns_priv_cache_to_result(const mdns_browse_t *browse)
                 continue;
             }
 
-            mdns_result_t *r = service_cache_to_result(entry, service);
+            mdns_result_t *r = mdns_priv_service_cache_to_result(entry, service);
             if (!r) {
-                mdns_priv_query_results_free(r);
-                continue;
+                mdns_priv_query_results_free(results);
+                return NULL;
             }
 
             r->next = results;

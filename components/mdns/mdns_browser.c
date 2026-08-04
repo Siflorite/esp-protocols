@@ -15,6 +15,7 @@
 #include "mdns_netif.h"
 #include "mdns_service.h"
 #include "esp_log.h"
+#include "mdns_cache.h"
 
 static const char *TAG = "mdns_browser";
 
@@ -144,24 +145,42 @@ static bool browse_match(const mdns_browse_t *a, const mdns_browse_t *b)
     return (strlen(a->subtype) == strlen(b->subtype) && memcmp(a->subtype, b->subtype, strlen(a->subtype)) == 0);
 }
 
+static bool browse_has_service(const char *service, const char *proto)
+{
+    for (const mdns_browse_t *it = s_browse; it; it = it->next) {
+        if (it->state == BROWSE_RUNNING && !mdns_utils_str_null_or_empty(it->service)
+                && !mdns_utils_str_null_or_empty(it->proto) && !strcasecmp(service, it->service) && !strcasecmp(proto, it->proto)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /**
  * @brief  Mark browse as finished, remove and free it from browse chain
  */
 static void browse_finish(mdns_browse_t *browse)
 {
+    bool removed = false;
     browse->state = BROWSE_OFF;
-    mdns_browse_t *b = s_browse;
-    mdns_browse_t *target_free = NULL;
-    while (b) {
-        if (browse_match(b, browse)) {
-            target_free = b;
-            b = b->next;
-            queueDetach(mdns_browse_t, s_browse, target_free);
-            browse_item_free(target_free);
-        } else {
-            b = b->next;
+
+    for (mdns_browse_t *it = s_browse; it; it = it->next) {
+        if (browse_match(it, browse)) {
+            queueDetach(mdns_browse_t, s_browse, it);
+            browse_item_free(it);
+            removed = true;
+            break;
         }
     }
+
+    if (removed) {
+        if (!browse_has_service(browse->service, browse->proto)) {
+            mdns_priv_remove_service_caches(browse->service, browse->proto);
+        } else if (!mdns_utils_str_null_or_empty(browse->subtype)) {
+            mdns_priv_service_cache_remove_subtype(browse->service, browse->proto, browse->subtype);
+        }
+    }
+
     browse_item_free(browse);
 }
 
@@ -407,7 +426,7 @@ mdns_browse_t *mdns_priv_browse_find(mdns_name_t *name, uint16_t type, mdns_if_t
     if (type != MDNS_TYPE_SRV && type != MDNS_TYPE_A && type != MDNS_TYPE_AAAA && type != MDNS_TYPE_TXT) {
         return NULL;
     }
-    mdns_result_t *r = NULL;
+
     while (b) {
         if (type == MDNS_TYPE_SRV || type == MDNS_TYPE_TXT) {
             if (strcasecmp(name->service, b->service)
@@ -417,18 +436,14 @@ mdns_browse_t *mdns_priv_browse_find(mdns_name_t *name, uint16_t type, mdns_if_t
             }
             return b;
         } else if (type == MDNS_TYPE_A || type == MDNS_TYPE_AAAA) {
-            r = b->result;
-            while (r) {
-                if (r->esp_netif == mdns_priv_get_esp_netif(tcpip_if) && r->ip_protocol == ip_protocol && !mdns_utils_str_null_or_empty(r->hostname) && !strcasecmp(name->host, r->hostname)) {
-                    return b;
-                }
-                r = r->next;
+            if (mdns_priv_host_has_service(name->host, mdns_priv_get_esp_netif(tcpip_if), ip_protocol, b->service, b->proto)) {
+                return b;
             }
             b = b->next;
             continue;
         }
     }
-    return b;
+    return NULL;
 }
 
 static void sync_browse_result_link_free(mdns_browse_sync_t *browse_sync)
@@ -844,6 +859,143 @@ esp_err_t mdns_priv_browse_sync(mdns_browse_sync_t *browse_sync)
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+static bool service_cache_matches_browse(const mdns_service_cache_t *service, const mdns_browse_t *browse)
+{
+    if (!service || !browse) {
+        return false;
+    }
+
+    return browse->state == BROWSE_RUNNING && browse->notifier && !mdns_utils_str_null_or_empty(browse->service)
+           && !mdns_utils_str_null_or_empty(browse->proto) && !strcasecmp(service->service, browse->service)
+           && !strcasecmp(service->proto, browse->proto);
+}
+
+static bool browse_result_matches_service_cache(const mdns_result_t *result, const mdns_cache_entry_t *entry, const mdns_service_cache_t *service)
+{
+    return result && result->esp_netif == entry->esp_netif && result->ip_protocol == entry->ip_protocol
+           && result->instance_name && result->service_type && result->proto
+           && !strcasecmp(result->instance_name, service->instance_name)
+           && !strcasecmp(result->service_type, service->service)
+           && !strcasecmp(result->proto, service->proto);
+}
+
+static mdns_result_t **browse_find_result(mdns_browse_t *browse, const mdns_cache_entry_t *entry, const mdns_service_cache_t *service)
+{
+    mdns_result_t **link = &browse->result;
+    while (*link) {
+        if (browse_result_matches_service_cache(*link, entry, service)) {
+            return link;
+        }
+        link = &(*link)->next;
+    }
+    return link;
+}
+
+static void browse_replace_result(mdns_result_t **link, mdns_result_t *new_result)
+{
+    mdns_result_t *old_result = *link;
+
+    if (old_result) {
+        new_result->next = old_result->next;
+        *link = new_result;
+
+        old_result->next = NULL;
+        mdns_priv_query_results_free(old_result);
+    } else {
+        new_result->next = NULL;
+        *link = new_result;
+    }
+}
+
+static bool update_browse_result(mdns_browse_t *browse, const mdns_cache_entry_t *entry, const mdns_service_cache_t *service)
+{
+    mdns_result_t *new_result = mdns_priv_service_cache_to_result(entry, service);
+    if (!new_result) {
+        return false;
+    }
+
+    mdns_browse_sync_t *sync_browse = mdns_priv_browse_ensure_sync(browse, NULL);
+    if (!sync_browse) {
+        mdns_priv_query_results_free(new_result);
+        return false;
+    }
+
+    if (add_browse_result(sync_browse, new_result) != ESP_OK) {
+        mdns_priv_query_results_free(new_result);
+        mdns_priv_browse_sync_free(sync_browse);
+        return false;
+    }
+
+    mdns_result_t **link = browse_find_result(browse, entry, service);
+    browse_replace_result(link, new_result);
+
+    if (mdns_priv_browse_sync(sync_browse) != ESP_OK) {
+        mdns_priv_browse_sync_free(sync_browse);
+        return false;
+    }
+
+    return true;
+}
+
+bool mdns_priv_browse_update_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service)
+{
+    bool updated = true;
+
+    if (!entry || !service) {
+        return false;
+    }
+
+    // Update all browsers matching service.proto, without subtype
+    for (mdns_browse_t *browse = s_browse; browse; browse = browse->next) {
+        if (service_cache_matches_browse(service, browse)) {
+            updated &= update_browse_result(browse, entry, service);
+        }
+    }
+    return updated;
+}
+
+void mdns_priv_browse_remove_result_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service, const char *subtype)
+{
+    if (!entry || !service) {
+        return;
+    }
+
+    for (mdns_browse_t *browse = s_browse; browse; browse = browse->next) {
+        if (browse->state != BROWSE_RUNNING || !browse->notifier || strcasecmp(browse->service, service->service) || strcasecmp(browse->proto, service->proto)) {
+            continue;
+        }
+
+        // subtype == NULL -> The whole service cache entry is removed, notify all browsers.
+        // subtype != NULL -> The subtype is removed, notify only the browser with the same subtype.
+        if (!mdns_utils_str_null_or_empty(subtype) && (mdns_utils_str_null_or_empty(browse->subtype) || strcasecmp(browse->subtype, subtype))) {
+            continue;
+        }
+
+        mdns_result_t **result_link = browse_find_result(browse, entry, service);
+        mdns_result_t *result = *result_link;
+        if (!result) {
+            continue;
+        }
+
+        mdns_browse_sync_t *sync_browse = mdns_priv_browse_ensure_sync(browse, NULL);
+        if (!sync_browse) {
+            continue;
+        }
+
+        if (add_browse_result(sync_browse, result) != ESP_OK) {
+            mdns_priv_browse_sync_free(sync_browse);
+            continue;
+        }
+
+        uint32_t previous_ttl = result->ttl;
+        result->ttl = 0;
+        if (mdns_priv_browse_sync(sync_browse) != ESP_OK) {
+            result->ttl = previous_ttl;
+            mdns_priv_browse_sync_free(sync_browse);
+        }
+    }
 }
 
 /**
