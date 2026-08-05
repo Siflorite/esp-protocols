@@ -937,7 +937,7 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
                 }
                 if (browse_for_ptr) {
                     packet_browse = browse_for_ptr;
-
+                    printf("PTR ttl: %" PRIu32 "\n", ttl);
                     (void)mdns_priv_cache_update_ptr(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol,
                                                      name->host, browse_for_ptr->service, browse_for_ptr->proto,
                                                      browse_for_ptr->subtype, ttl);

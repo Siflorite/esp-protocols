@@ -163,7 +163,7 @@ static void browse_finish(mdns_browse_t *browse)
 {
     bool removed = false;
     browse->state = BROWSE_OFF;
-
+    ESP_LOGI(TAG, "Browse finished: %s, %s, %s", browse->service, browse->proto, browse->subtype);
     for (mdns_browse_t *it = s_browse; it; it = it->next) {
         if (browse_match(it, browse)) {
             queueDetach(mdns_browse_t, s_browse, it);
@@ -174,9 +174,12 @@ static void browse_finish(mdns_browse_t *browse)
     }
 
     if (removed) {
+        ESP_LOGI(TAG, "Browse removed: %s, %s, %s", browse->service, browse->proto, browse->subtype);
         if (!browse_has_service(browse->service, browse->proto)) {
+            ESP_LOGI(TAG, "Service caches to be removed: %s, %s", browse->service, browse->proto);
             mdns_priv_remove_service_caches(browse->service, browse->proto);
         } else if (!mdns_utils_str_null_or_empty(browse->subtype)) {
+            ESP_LOGI(TAG, "Subtype to be removed: %s, %s, %s", browse->service, browse->proto, browse->subtype);
             mdns_priv_service_cache_remove_subtype(browse->service, browse->proto, browse->subtype);
         }
     }
@@ -253,8 +256,10 @@ static void browse_add(mdns_browse_t *browse)
         }
     }
     if (found) {
+        ESP_LOGI(TAG, "Browse already exists: %s, %s, %s", browse->service, browse->proto, browse->subtype);
         browse_item_free(browse);
     }
+    ESP_LOGI(TAG, "Browse added: %s, %s, %s", browse->service, browse->proto, browse->subtype);
 }
 
 static esp_err_t add_browse_result(mdns_browse_sync_t *sync_browse, mdns_result_t *r);
@@ -861,15 +866,34 @@ esp_err_t mdns_priv_browse_sync(mdns_browse_sync_t *browse_sync)
     return ESP_OK;
 }
 
-static bool service_cache_matches_browse(const mdns_service_cache_t *service, const mdns_browse_t *browse)
+static bool service_cache_has_subtype(const mdns_service_cache_t *service, const char *subtype)
 {
-    if (!service || !browse) {
+    if (!service || mdns_utils_str_null_or_empty(subtype)) {
         return false;
     }
 
-    return browse->state == BROWSE_RUNNING && browse->notifier && !mdns_utils_str_null_or_empty(browse->service)
-           && !mdns_utils_str_null_or_empty(browse->proto) && !strcasecmp(service->service, browse->service)
-           && !strcasecmp(service->proto, browse->proto);
+    for (const mdns_cache_subtype_t *subtype_list = service->subtype_list; subtype_list; subtype_list = subtype_list->next) {
+        if (!mdns_utils_str_null_or_empty(subtype_list->subtype) && !strcasecmp(subtype_list->subtype, subtype)) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool service_cache_matches_browse(const mdns_service_cache_t *service, const mdns_browse_t *browse)
+{
+    if (!service || !browse || browse->state != BROWSE_RUNNING || !browse->notifier
+            || mdns_utils_str_null_or_empty(browse->service) || mdns_utils_str_null_or_empty(browse->proto)
+            || strcasecmp(service->service, browse->service) || strcasecmp(service->proto, browse->proto)) {
+        return false;
+    }
+
+    if (mdns_utils_str_null_or_empty(browse->subtype)) {
+        return service->ptr_present;
+    }
+
+    return service_cache_has_subtype(service, browse->subtype);
 }
 
 static bool browse_result_matches_service_cache(const mdns_result_t *result, const mdns_cache_entry_t *entry, const mdns_service_cache_t *service)
@@ -930,6 +954,7 @@ static bool update_browse_result(mdns_browse_t *browse, const mdns_cache_entry_t
 
     mdns_result_t **link = browse_find_result(browse, entry, service);
     browse_replace_result(link, new_result);
+    ESP_LOGI(TAG, "Browse result updated: %s, %s, %s", browse->service, browse->proto, browse->subtype);
 
     if (mdns_priv_browse_sync(sync_browse) != ESP_OK) {
         mdns_priv_browse_sync_free(sync_browse);
@@ -956,26 +981,37 @@ bool mdns_priv_browse_update_from_service_cache(const mdns_cache_entry_t *entry,
     return updated;
 }
 
-void mdns_priv_browse_remove_result_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service, const char *subtype)
+static void browse_remove_results_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service,
+                                                     const char *subtype, bool remove_all)
 {
     if (!entry || !service) {
         return;
     }
 
     for (mdns_browse_t *browse = s_browse; browse; browse = browse->next) {
-        if (browse->state != BROWSE_RUNNING || !browse->notifier || strcasecmp(browse->service, service->service) || strcasecmp(browse->proto, service->proto)) {
+        if (browse->state != BROWSE_RUNNING || !browse->notifier
+                || mdns_utils_str_null_or_empty(browse->service) || mdns_utils_str_null_or_empty(browse->proto)
+                || strcasecmp(browse->service, service->service) || strcasecmp(browse->proto, service->proto)) {
             continue;
         }
 
-        // subtype == NULL -> The whole service cache entry is removed, notify all browsers.
-        // subtype != NULL -> The subtype is removed, notify only the browser with the same subtype.
-        if (!mdns_utils_str_null_or_empty(subtype) && (mdns_utils_str_null_or_empty(browse->subtype) || strcasecmp(browse->subtype, subtype))) {
-            continue;
+        if (!remove_all) {
+            if (mdns_utils_str_null_or_empty(subtype)) {
+                // PTR goodbye: only removes non-subtype browse
+                if (!mdns_utils_str_null_or_empty(browse->subtype)) {
+                    continue;
+                }
+            } else {
+                // Subtype PTR goodbye: only removes browse with identical subtype
+                if (mdns_utils_str_null_or_empty(browse->subtype) || strcasecmp(browse->subtype, subtype)) {
+                    continue;
+                }
+            }
         }
 
         mdns_result_t **result_link = browse_find_result(browse, entry, service);
         mdns_result_t *result = *result_link;
-        if (!result) {
+        if (!result || result->ttl == 0) {
             continue;
         }
 
@@ -991,11 +1027,25 @@ void mdns_priv_browse_remove_result_from_service_cache(const mdns_cache_entry_t 
 
         uint32_t previous_ttl = result->ttl;
         result->ttl = 0;
+        ESP_LOGI(TAG, "Browse result removed: %s, %s, %s", browse->service, browse->proto, browse->subtype);
         if (mdns_priv_browse_sync(sync_browse) != ESP_OK) {
             result->ttl = previous_ttl;
             mdns_priv_browse_sync_free(sync_browse);
         }
     }
+}
+
+void mdns_priv_browse_remove_result_from_service_cache(const mdns_cache_entry_t *entry,
+                                                       const mdns_service_cache_t *service,
+                                                       const char *subtype)
+{
+    browse_remove_results_from_service_cache(entry, service, subtype, false);
+}
+
+void mdns_priv_browse_remove_all_results_from_service_cache(const mdns_cache_entry_t *entry,
+                                                            const mdns_service_cache_t *service)
+{
+    browse_remove_results_from_service_cache(entry, service, NULL, true);
 }
 
 /**

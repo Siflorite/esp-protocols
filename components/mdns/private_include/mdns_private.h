@@ -413,16 +413,38 @@ typedef struct {
     } data;
 } mdns_action_t;
 
+typedef struct mdns_cache_subtype_s {
+    char *subtype;
+    uint32_t ttl;
+    struct mdns_cache_subtype_s *next;
+} mdns_cache_subtype_t;
+
+typedef struct mdns_cache_addr_s {
+    esp_ip_addr_t addr;
+    uint32_t ttl;
+    struct mdns_cache_addr_s *next;
+} mdns_cache_addr_t;
+
 typedef struct mdns_service_cache_s {
     char *instance_name;
     char *service;
     char *proto;
-    mdns_subtype_t *subtype_list;
+
+    bool ptr_present;
+    uint32_t ptr_ttl;
+
+    mdns_cache_subtype_t *subtype_list;
+
+    bool srv_present;
     uint16_t priority;
     uint16_t weight;
     uint16_t port;
+    uint32_t srv_ttl;
+
+    bool txt_present;
     mdns_txt_linked_item_t *txt_list;
-    uint32_t ttl;
+    uint32_t txt_ttl;
+
     bool dirty;
     struct mdns_service_cache_s *next;
 } mdns_service_cache_t;
@@ -431,7 +453,8 @@ typedef struct mdns_cache_entry_s {
     char *hostname;
     esp_netif_t *esp_netif;
     mdns_ip_protocol_t ip_protocol;
-    mdns_ip_addr_t *addr_list;
+
+    mdns_cache_addr_t *addr_list;
     mdns_service_cache_t *service_cache_list;
     struct mdns_cache_entry_s *next;
 } mdns_cache_entry_t;

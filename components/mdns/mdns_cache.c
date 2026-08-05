@@ -28,14 +28,45 @@ static inline bool nullable_names_equal(const char *a, const char *b)
 
 static bool update_ttl(uint32_t *cached_ttl, uint32_t ttl)
 {
-    uint32_t previous_ttl = *cached_ttl;
-    if (*cached_ttl == 0) {
-        *cached_ttl = ttl;
-    } else {
-        *cached_ttl = *cached_ttl < ttl ? *cached_ttl : ttl;
+    if (*cached_ttl == ttl) {
+        return false;
+    }
+    *cached_ttl = ttl;
+    return true;
+}
+
+static void calc_min_ttl(uint32_t *out_ttl, uint32_t ttl)
+{
+    if (ttl != 0 && (*out_ttl == 0 || ttl < *out_ttl)) {
+        *out_ttl = ttl;
+    }
+}
+
+static uint32_t service_cache_result_ttl(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service)
+{
+    uint32_t ttl = 0;
+
+    if (service->ptr_present) {
+        calc_min_ttl(&ttl, service->ptr_ttl);
     }
 
-    return previous_ttl != *cached_ttl;
+    for (const mdns_cache_subtype_t *subtype = service->subtype_list; subtype; subtype = subtype->next) {
+        calc_min_ttl(&ttl, subtype->ttl);
+    }
+
+    if (service->srv_present) {
+        calc_min_ttl(&ttl, service->srv_ttl);
+    }
+
+    if (service->txt_present) {
+        calc_min_ttl(&ttl, service->txt_ttl);
+    }
+
+    for (const mdns_cache_addr_t *addr = entry->addr_list; addr; addr = addr->next) {
+        calc_min_ttl(&ttl, addr->ttl);
+    }
+
+    return ttl;
 }
 
 static bool service_match(const mdns_service_cache_t *cache, const char *instance, const char *service, const char *proto)
@@ -90,34 +121,44 @@ static void cache_print(void)
                  ip_protocol_str);
 
         ESP_LOGI(TAG, "addresses:");
-        for (mdns_ip_addr_t *addr = entry->addr_list; addr; addr = addr->next) {
+        for (mdns_cache_addr_t *addr = entry->addr_list; addr; addr = addr->next) {
 #ifdef CONFIG_LWIP_IPV4
             if (addr->addr.type == ESP_IPADDR_TYPE_V4) {
-                ESP_LOGI(TAG, "  A: " IPSTR, IP2STR(&addr->addr.u_addr.ip4));
+                ESP_LOGI(TAG, "  A: " IPSTR " ttl=%" PRIu32, IP2STR(&addr->addr.u_addr.ip4), addr->ttl);
             }
 #endif
 #ifdef CONFIG_LWIP_IPV6
             if (addr->addr.type == ESP_IPADDR_TYPE_V6) {
-                ESP_LOGI(TAG, "  AAAA: " IPV6STR, IPV62STR(addr->addr.u_addr.ip6));
+                ESP_LOGI(TAG, "  AAAA: " IPV6STR " ttl=%" PRIu32, IPV62STR(addr->addr.u_addr.ip6), addr->ttl);
             }
 #endif
         }
 
         ESP_LOGI(TAG, "services:");
         for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
-            ESP_LOGI(TAG, "  service=%s.%s.%s port=%u ttl=%" PRIu32,
+            ESP_LOGI(TAG, "  service=%s.%s.%s:%u, priority=%u, weight=%u",
                      service->instance_name,
                      service->service,
                      service->proto,
                      service->port,
-                     service->ttl);
+                     service->priority,
+                     service->weight);
             ESP_LOGI(TAG, "  subtypes:");
-            for (mdns_subtype_t *subtype = service->subtype_list; subtype; subtype = subtype->next) {
-                ESP_LOGI(TAG, "    %s", subtype->subtype);
+            for (mdns_cache_subtype_t *subtype = service->subtype_list; subtype; subtype = subtype->next) {
+                ESP_LOGI(TAG, "    %s ttl=%" PRIu32, subtype->subtype, subtype->ttl);
             }
             ESP_LOGI(TAG, "  txts:");
             for (mdns_txt_linked_item_t *txt = service->txt_list; txt; txt = txt->next) {
                 ESP_LOGI(TAG, "    %s=%s length=%u", txt->key, txt->value, txt->value_len);
+            }
+            if (service->ptr_present) {
+                ESP_LOGI(TAG, "    PTR ttl=%" PRIu32, service->ptr_ttl);
+            }
+            if (service->srv_present) {
+                ESP_LOGI(TAG, "    SRV ttl=%" PRIu32, service->srv_ttl);
+            }
+            if (service->txt_present) {
+                ESP_LOGI(TAG, "    TXT ttl=%" PRIu32, service->txt_ttl);
             }
         }
     }
@@ -134,6 +175,11 @@ static void cache_finish_update(const char *record_type, mdns_cache_update_resul
     ESP_LOGI(TAG, "cache_finish_update: %s result=%d", record_type, result);
     cache_print();
 #endif
+}
+
+static bool service_cache_is_empty(const mdns_service_cache_t *service)
+{
+    return !service->ptr_present && !service->srv_present && !service->txt_present && !service->subtype_list;
 }
 
 static void service_cache_mark_dirty(mdns_service_cache_t *service_entry, mdns_cache_update_result_t result)
@@ -198,11 +244,12 @@ bool mdns_priv_host_has_service(const char *hostname, const esp_netif_t *esp_net
 
 static void service_entry_free(mdns_service_cache_t *service_entry)
 {
+    ESP_LOGI(TAG, "Cache service freed: %s, %s, %s", service_entry->instance_name, service_entry->service, service_entry->proto);
     mdns_mem_free(service_entry->instance_name);
     mdns_mem_free(service_entry->service);
     mdns_mem_free(service_entry->proto);
     while (service_entry->subtype_list) {
-        mdns_subtype_t *subtype = service_entry->subtype_list;
+        mdns_cache_subtype_t *subtype = service_entry->subtype_list;
         service_entry->subtype_list = subtype->next;
         mdns_mem_free((char *)subtype->subtype);
         mdns_mem_free(subtype);
@@ -219,9 +266,10 @@ static void service_entry_free(mdns_service_cache_t *service_entry)
 
 static void cache_entry_free(mdns_cache_entry_t *entry)
 {
+    ESP_LOGI(TAG, "Cache entry freed: %s, %p, %d", entry->hostname, entry->esp_netif, entry->ip_protocol);
     mdns_mem_free(entry->hostname);
     while (entry->addr_list) {
-        mdns_ip_addr_t *addr = entry->addr_list;
+        mdns_cache_addr_t *addr = entry->addr_list;
         entry->addr_list = entry->addr_list->next;
         mdns_mem_free(addr);
     }
@@ -273,6 +321,7 @@ static mdns_cache_entry_t *cache_add_entry(const char *hostname, const esp_netif
     entry->ip_protocol = ip_protocol;
     entry->next = s_cache;
     s_cache = entry;
+    ESP_LOGI(TAG, "Cache entry added: %s, %p, %d", hostname, esp_netif, ip_protocol);
     return entry;
 }
 
@@ -323,6 +372,7 @@ static mdns_service_cache_t *cache_add_service(mdns_cache_entry_t *entry, const 
 
     service_entry->next = entry->service_cache_list;
     entry->service_cache_list = service_entry;
+    ESP_LOGI(TAG, "Cache service added: %s, %s, %s", instance, service, proto);
     return service_entry;
 }
 
@@ -341,6 +391,7 @@ static bool cache_move_service(mdns_cache_entry_t *old_entry, mdns_cache_entry_t
             new_entry->service_cache_list = cache;
 
             cache_remove_entry_if_empty(old_entry);
+            ESP_LOGI(TAG, "Cache service moved: %s, %s, %s", cache->instance_name, cache->service, cache->proto);
             return true;
         }
         old_entry_cache = &(*old_entry_cache)->next;
@@ -350,7 +401,7 @@ static bool cache_move_service(mdns_cache_entry_t *old_entry, mdns_cache_entry_t
     return false;
 }
 
-static mdns_cache_update_result_t service_cache_add_subtype(mdns_service_cache_t *service_entry, const char *subtype)
+static mdns_cache_update_result_t service_cache_add_subtype(mdns_service_cache_t *service_entry, const char *subtype, uint32_t ttl)
 {
     if (!service_entry) {
         return MDNS_CACHE_ERROR;
@@ -360,28 +411,30 @@ static mdns_cache_update_result_t service_cache_add_subtype(mdns_service_cache_t
         return MDNS_CACHE_NO_CHANGE;
     }
 
-    mdns_subtype_t **subtype_entry = &service_entry->subtype_list;
-    while (*subtype_entry) {
-        if (names_equal((*subtype_entry)->subtype, subtype)) {
-            return MDNS_CACHE_NO_CHANGE;
+    for (mdns_cache_subtype_t *it = service_entry->subtype_list; it; it = it->next) {
+        if (names_equal(it->subtype, subtype)) {
+            return update_ttl(&it->ttl, ttl) ? MDNS_CACHE_UPDATED : MDNS_CACHE_NO_CHANGE;
         }
-        subtype_entry = &(*subtype_entry)->next;
     }
 
-    *subtype_entry = mdns_mem_calloc(1, sizeof(mdns_subtype_t));
-    if (!*subtype_entry) {
+    mdns_cache_subtype_t* subtype_entry = mdns_mem_calloc(1, sizeof(mdns_cache_subtype_t));
+    if (!subtype_entry) {
         HOOK_MALLOC_FAILED;
         return MDNS_CACHE_ERROR;
     }
 
-    (*subtype_entry)->subtype = mdns_mem_strdup(subtype);
-    if (!(*subtype_entry)->subtype) {
+    subtype_entry->subtype = mdns_mem_strdup(subtype);
+    if (!subtype_entry->subtype) {
         HOOK_MALLOC_FAILED;
-        mdns_mem_free(*subtype_entry);
-        *subtype_entry = NULL;
+        mdns_mem_free(subtype_entry);
         return MDNS_CACHE_ERROR;
     }
 
+    subtype_entry->ttl = ttl;
+    subtype_entry->next = service_entry->subtype_list;
+    service_entry->subtype_list = subtype_entry;
+
+    ESP_LOGI(TAG, "Cache subtype added: %s, %s, %s", service_entry->instance_name, service_entry->service, service_entry->proto);
     return MDNS_CACHE_UPDATED;
 }
 
@@ -391,13 +444,14 @@ static bool service_cache_remove_subtype(mdns_service_cache_t *service_entry, co
         return false;
     }
 
-    mdns_subtype_t **subtype_entry = &service_entry->subtype_list;
+    mdns_cache_subtype_t **subtype_entry = &service_entry->subtype_list;
     while (*subtype_entry) {
         if (names_equal((*subtype_entry)->subtype, subtype)) {
-            mdns_subtype_t *removed_subtype = *subtype_entry;
+            mdns_cache_subtype_t *removed_subtype = *subtype_entry;
             *subtype_entry = removed_subtype->next;
-            mdns_mem_free((char *)removed_subtype->subtype);
+            mdns_mem_free(removed_subtype->subtype);
             mdns_mem_free(removed_subtype);
+            ESP_LOGI(TAG, "Cache subtype removed: %s, %s, %s", service_entry->instance_name, service_entry->service, service_entry->proto);
             return true;
         }
         subtype_entry = &(*subtype_entry)->next;
@@ -415,6 +469,7 @@ static bool cache_remove_service(mdns_cache_entry_t *entry, mdns_service_cache_t
     while (*service_entry_ptr) {
         if (*service_entry_ptr == service_entry) {
             *service_entry_ptr = service_entry->next;
+            ESP_LOGI(TAG, "Cache service removed: %s, %s, %s", service_entry->instance_name, service_entry->service, service_entry->proto);
             service_entry_free(service_entry);
             cache_remove_entry_if_empty(entry);
             return true;
@@ -443,7 +498,9 @@ void mdns_priv_remove_service_caches(const char *service, const char *proto)
             service_ptr = &(*service_ptr)->next;
         }
 
-        if (cache_remove_entry_if_empty(entry)) {
+        if (!entry->service_cache_list) {
+            *entry_ptr = entry->next;
+            cache_entry_free(entry);
             continue;
         }
         entry_ptr = &(*entry_ptr)->next;
@@ -478,15 +535,23 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
         }
 
         if (!mdns_utils_str_null_or_empty(subtype)) {
-            bool subtype_removed = service_cache_remove_subtype(service_entry, subtype);
-            if (subtype_removed) {
-                mdns_priv_browse_remove_result_from_service_cache(owner_entry, service_entry, subtype);
+            if (!service_cache_remove_subtype(service_entry, subtype)) {
+                return MDNS_CACHE_NO_CHANGE;
             }
-            return subtype_removed ? MDNS_CACHE_UPDATED : MDNS_CACHE_NO_CHANGE;
+        } else {
+            if (!service_entry->ptr_present) {
+                return MDNS_CACHE_NO_CHANGE;
+            }
+            service_entry->ptr_present = false;
+            service_entry->ptr_ttl = 0;
         }
 
-        mdns_priv_browse_remove_result_from_service_cache(owner_entry, service_entry, NULL);
-        return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
+        mdns_priv_browse_remove_result_from_service_cache(owner_entry, service_entry, mdns_utils_str_null_or_empty(subtype) ? NULL : subtype);
+        service_entry->dirty = true;
+        if (service_cache_is_empty(service_entry)) {
+            return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
+        }
+        return MDNS_CACHE_UPDATED;
     }
 
     if (!service_entry) {
@@ -504,19 +569,24 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
         new_service = true;
     }
 
-    result = service_cache_add_subtype(service_entry, subtype);
-    if (result == MDNS_CACHE_ERROR) {
-        return MDNS_CACHE_ERROR;
-    }
+    if (!mdns_utils_str_null_or_empty(subtype)) {
+        result = service_cache_add_subtype(service_entry, subtype, ttl);
+        if (result == MDNS_CACHE_ERROR) {
+            return MDNS_CACHE_ERROR;
+        }
+    } else {
+        bool changed = !service_entry->ptr_present;
+        service_entry->ptr_present = true;
+        changed |= update_ttl(&service_entry->ptr_ttl, ttl);
 
-    bool ttl_changed = update_ttl(&service_entry->ttl, ttl);
+        if (changed) {
+            result = MDNS_CACHE_UPDATED;
+        }
+    }
 
     if (new_service) {
         result = MDNS_CACHE_ADDED;
-    } else if (ttl_changed) {
-        result = MDNS_CACHE_UPDATED;
     }
-
     service_cache_mark_dirty(service_entry, result);
     cache_finish_update("PTR", result);
     return result;
@@ -526,6 +596,10 @@ static mdns_cache_update_result_t service_cache_srv_update(mdns_service_cache_t 
 {
     mdns_cache_update_result_t result = MDNS_CACHE_NO_CHANGE;
 
+    if (!cache->srv_present) {
+        cache->srv_present = true;
+        result = MDNS_CACHE_UPDATED;
+    }
     if (cache->priority != priority) {
         cache->priority = priority;
         result = MDNS_CACHE_UPDATED;
@@ -538,7 +612,7 @@ static mdns_cache_update_result_t service_cache_srv_update(mdns_service_cache_t 
         cache->port = port;
         result = MDNS_CACHE_UPDATED;
     }
-    if (update_ttl(&cache->ttl, ttl)) {
+    if (update_ttl(&cache->srv_ttl, ttl)) {
         result = MDNS_CACHE_UPDATED;
     }
 
@@ -555,10 +629,22 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
     mdns_cache_update_result_t result = MDNS_CACHE_NO_CHANGE;
 
     if (ttl == 0) {
-        if (service_entry) {
-            mdns_priv_browse_remove_result_from_service_cache(owner_entry, service_entry, NULL);
+        if (!service_entry || !service_entry->srv_present) {
+            return MDNS_CACHE_NO_CHANGE;
         }
-        return service_entry && cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
+
+        service_entry->srv_present = false;
+        service_entry->priority = 0;
+        service_entry->weight = 0;
+        service_entry->port = 0;
+        service_entry->srv_ttl = 0;
+        service_entry->dirty = true;
+
+        if (service_cache_is_empty(service_entry)) {
+            mdns_priv_browse_remove_all_results_from_service_cache(owner_entry, service_entry);
+            return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
+        }
+        return MDNS_CACHE_UPDATED;
     }
 
     host_entry = cache_get_or_add_entry(hostname, esp_netif, ip_protocol);
@@ -670,18 +756,20 @@ static bool txt_list_equal(const mdns_txt_linked_item_t *a, const mdns_txt_linke
     return true;
 }
 
-static mdns_cache_update_result_t service_cache_txt_update(mdns_service_cache_t *service_entry, mdns_txt_linked_item_t *new_txt)
+static mdns_cache_update_result_t service_cache_txt_update(mdns_service_cache_t *service_entry, mdns_txt_linked_item_t *new_txt, uint32_t ttl)
 {
     if (!service_entry) {
         free_txt_linked_list(new_txt);
         return MDNS_CACHE_ERROR;
     }
 
-    if (txt_list_equal(service_entry->txt_list, new_txt)) {
+    if (txt_list_equal(service_entry->txt_list, new_txt) && service_entry->txt_present && !update_ttl(&service_entry->txt_ttl, ttl)) {
         free_txt_linked_list(new_txt);
         return MDNS_CACHE_NO_CHANGE;
     }
 
+    service_entry->txt_present = true;
+    service_entry->txt_ttl = ttl;
     mdns_txt_linked_item_t *old_txt = service_entry->txt_list;
     service_entry->txt_list = new_txt;
     free_txt_linked_list(old_txt);
@@ -697,10 +785,21 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
 
     if (ttl == 0) {
         free_txt_linked_list(txt);
-        if (service_entry) {
-            mdns_priv_browse_remove_result_from_service_cache(owner_entry, service_entry, NULL);
+        if (!service_entry || !service_entry->txt_present) {
+            return MDNS_CACHE_NO_CHANGE;
         }
-        return service_entry && cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
+
+        free_txt_linked_list(service_entry->txt_list);
+        service_entry->txt_list = NULL;
+        service_entry->txt_present = false;
+        service_entry->txt_ttl = 0;
+        service_entry->dirty = true;
+
+        if (service_cache_is_empty(service_entry)) {
+            mdns_priv_browse_remove_all_results_from_service_cache(owner_entry, service_entry);
+            return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
+        }
+        return MDNS_CACHE_UPDATED;
     }
 
     if (!service_entry) {
@@ -720,13 +819,10 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
         new_service = true;
     }
 
-    result = service_cache_txt_update(service_entry, txt);
-    bool ttl_changed = update_ttl(&service_entry->ttl, ttl);
+    result = service_cache_txt_update(service_entry, txt, ttl);
 
     if (new_service) {
         result = MDNS_CACHE_ADDED;
-    } else if (ttl_changed) {
-        result = MDNS_CACHE_UPDATED;
     }
 
     service_cache_mark_dirty(service_entry, result);
@@ -748,13 +844,19 @@ mdns_cache_update_result_t mdns_priv_cache_update_addr(const esp_netif_t *esp_ne
         }
 
         // Remove addr
-        mdns_ip_addr_t **addr_ptr = &entry->addr_list;
+        mdns_cache_addr_t **addr_ptr = &entry->addr_list;
         while (*addr_ptr) {
             if (addr_equal(&(*addr_ptr)->addr, addr)) {
-                mdns_ip_addr_t *removed_addr = *addr_ptr;
+                mdns_cache_addr_t *removed_addr = *addr_ptr;
                 *addr_ptr = removed_addr->next;
                 mdns_mem_free(removed_addr);
+
+                for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
+                    service->dirty = true;
+                }
+
                 cache_remove_entry_if_empty(entry);
+
                 return MDNS_CACHE_REMOVED;
             }
             addr_ptr = &(*addr_ptr)->next;
@@ -768,29 +870,27 @@ mdns_cache_update_result_t mdns_priv_cache_update_addr(const esp_netif_t *esp_ne
         return MDNS_CACHE_ERROR;
     }
 
-    mdns_ip_addr_t *addr_entry = entry->addr_list;
+    mdns_cache_addr_t *addr_entry = entry->addr_list;
     while (addr_entry) {
         if (addr_equal(&addr_entry->addr, addr)) {
+            ttl_changed = update_ttl(&addr_entry->ttl, ttl);
             break;
         }
         addr_entry = addr_entry->next;
     }
 
     if (!addr_entry) {
-        mdns_ip_addr_t *new_addr = mdns_mem_calloc(1, sizeof(mdns_ip_addr_t));
+        mdns_cache_addr_t *new_addr = mdns_mem_calloc(1, sizeof(mdns_cache_addr_t));
         if (!new_addr) {
             HOOK_MALLOC_FAILED;
             cache_remove_entry_if_empty(entry);
             return MDNS_CACHE_ERROR;
         }
         new_addr->addr = *addr;
+        new_addr->ttl = ttl;
         new_addr->next = entry->addr_list;
         entry->addr_list = new_addr;
         addr_added = true;
-    }
-
-    for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
-        ttl_changed = update_ttl(&service->ttl, ttl) || ttl_changed;
     }
 
     result = (addr_added || ttl_changed) ? MDNS_CACHE_UPDATED : MDNS_CACHE_NO_CHANGE;
@@ -813,11 +913,11 @@ void mdns_priv_cache_clear(void)
 
 static bool service_cache_has_subtype(const mdns_service_cache_t *service_entry, const char *subtype)
 {
-    if (mdns_utils_str_null_or_empty(subtype)) {
-        return true;
+    if (!service_entry || mdns_utils_str_null_or_empty(subtype)) {
+        return false;
     }
 
-    for (const mdns_subtype_t *subtype_list = service_entry->subtype_list; subtype_list; subtype_list = subtype_list->next) {
+    for (const mdns_cache_subtype_t *subtype_list = service_entry->subtype_list; subtype_list; subtype_list = subtype_list->next) {
         if (names_equal(subtype_list->subtype, subtype)) {
             return true;
         }
@@ -827,8 +927,13 @@ static bool service_cache_has_subtype(const mdns_service_cache_t *service_entry,
 
 static bool service_cache_matches_browse(const mdns_service_cache_t *service, const mdns_browse_t *browse)
 {
-    if (!names_equal(service->service, browse->service) || !names_equal(service->proto, browse->proto)) {
+    if (!service || !browse || !names_equal(service->service, browse->service)
+            || !names_equal(service->proto, browse->proto)) {
         return false;
+    }
+
+    if (mdns_utils_str_null_or_empty(browse->subtype)) {
+        return service->ptr_present;
     }
 
     return service_cache_has_subtype(service, browse->subtype);
@@ -894,14 +999,14 @@ cleanup:
     return false;
 }
 
-static bool project_addr(const mdns_ip_addr_t *addr_list, mdns_ip_addr_t **out_addr_list)
+static bool project_addr(const mdns_cache_addr_t *addr_list, mdns_ip_addr_t **out_addr_list)
 {
     mdns_ip_addr_t *head = NULL;
     mdns_ip_addr_t **tail = &head;
 
     *out_addr_list = NULL;
 
-    for (const mdns_ip_addr_t *addr = addr_list; addr; addr = addr->next) {
+    for (const mdns_cache_addr_t *addr = addr_list; addr; addr = addr->next) {
         mdns_ip_addr_t *new_addr = mdns_mem_calloc(1, sizeof(mdns_ip_addr_t));
         if (!new_addr) {
             HOOK_MALLOC_FAILED;
@@ -928,7 +1033,7 @@ mdns_result_t *mdns_priv_service_cache_to_result(const mdns_cache_entry_t *entry
     ESP_GOTO_ON_FALSE(result, ESP_ERR_NO_MEM, error, TAG, "Failed to allocate result");
 
     result->esp_netif = entry->esp_netif;
-    result->ttl = service->ttl;
+    result->ttl = service_cache_result_ttl(entry, service);
     result->ip_protocol = entry->ip_protocol;
 
     result->instance_name = mdns_mem_strdup(service->instance_name);
@@ -937,13 +1042,18 @@ mdns_result_t *mdns_priv_service_cache_to_result(const mdns_cache_entry_t *entry
     ESP_GOTO_ON_FALSE(result->service_type, ESP_ERR_NO_MEM, error, TAG, "Failed to allocate service type");
     result->proto = mdns_mem_strdup(service->proto);
     ESP_GOTO_ON_FALSE(result->proto, ESP_ERR_NO_MEM, error, TAG, "Failed to allocate protocol");
-    if (entry->hostname) {
-        result->hostname = mdns_mem_strdup(entry->hostname);
-        ESP_GOTO_ON_FALSE(result->hostname, ESP_ERR_NO_MEM, error, TAG, "Failed to allocate hostname");
+
+    if (service->srv_present) {
+        if (entry->hostname) {
+            result->hostname = mdns_mem_strdup(entry->hostname);
+            ESP_GOTO_ON_FALSE(result->hostname, ESP_ERR_NO_MEM, error, TAG, "Failed to allocate hostname");
+        }
+        result->port = service->port;
     }
 
-    result->port = service->port;
-    ESP_GOTO_ON_FALSE(project_txt(service->txt_list, &result->txt, &result->txt_value_len, &result->txt_count), ESP_ERR_NO_MEM, error, TAG, "Failed to project TXT");
+    if (service->txt_present) {
+        ESP_GOTO_ON_FALSE(project_txt(service->txt_list, &result->txt, &result->txt_value_len, &result->txt_count), ESP_ERR_NO_MEM, error, TAG, "Failed to project TXT");
+    }
     ESP_GOTO_ON_FALSE(project_addr(entry->addr_list, &result->addr), ESP_ERR_NO_MEM, error, TAG, "Failed to project address list");
 
     return result;

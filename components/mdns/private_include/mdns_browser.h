@@ -150,9 +150,16 @@ bool mdns_priv_browse_update_from_service_cache(const mdns_cache_entry_t *entry,
 /**
  * @brief  Removes a browser result with corresponding service cache entry and subtype
  *
- * @note Called from TTL=0 event handlers in mdns_cache.c
+ * @note Called from PTR TTL=0 event handlers in mdns_cache.c
  */
 void mdns_priv_browse_remove_result_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service, const char *subtype);
+
+/**
+ * @brief  Removes all browser results with corresponding service cache entry
+ *
+ * @note  Called only when an entire cache entry is removed
+ */
+void mdns_priv_browse_remove_all_results_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service);
 #ifdef __cplusplus
 }
 #endif
