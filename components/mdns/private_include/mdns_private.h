@@ -412,42 +412,55 @@ typedef struct {
     } data;
 } mdns_action_t;
 
+
+/**
+ * @brief   mDNS cache PTR subtype structure
+ */
 typedef struct mdns_cache_subtype_s {
     char *subtype;
     uint32_t ttl;
     struct mdns_cache_subtype_s *next;
 } mdns_cache_subtype_t;
 
+/**
+ * @brief   mDNS cache ADDR list structure
+ */
 typedef struct mdns_cache_addr_s {
     esp_ip_addr_t addr;
     uint32_t ttl;
     struct mdns_cache_addr_s *next;
 } mdns_cache_addr_t;
 
+/**
+ * @brief   mDNS cache service structure, contains PTR (with subtype list), SRV and TXT records
+ */
 typedef struct mdns_service_cache_s {
     char *instance_name;
     char *service;
     char *proto;
-
-    bool ptr_present;
+    // PTR
+    bool ptr_present;   /*!< true if PTR record is present */
     uint32_t ptr_ttl;
-
+    // Subtype list
     mdns_cache_subtype_t *subtype_list;
-
-    bool srv_present;
+    // SRV
+    bool srv_present;   /*!< true if SRV record is present */
     uint16_t priority;
     uint16_t weight;
     uint16_t port;
     uint32_t srv_ttl;
-
-    bool txt_present;
+    // TXT
+    bool txt_present;   /*!< true if TXT record is present */
     mdns_txt_linked_item_t *txt_list;
     uint32_t txt_ttl;
-
-    bool dirty;
+    // Dirty flag
+    bool dirty;         /*!< true if the service cache is modified but not yet notified */
     struct mdns_service_cache_s *next;
 } mdns_service_cache_t;
 
+/**
+ * @brief   mDNS cache entry structure, contains hostname, IP address list and service cache list
+ */
 typedef struct mdns_cache_entry_s {
     char *hostname;
     esp_netif_t *esp_netif;
@@ -458,10 +471,13 @@ typedef struct mdns_cache_entry_s {
     struct mdns_cache_entry_s *next;
 } mdns_cache_entry_t;
 
+/**
+ * @brief   mDNS cache update result structure
+ */
 typedef enum {
-    MDNS_CACHE_NO_CHANGE,
-    MDNS_CACHE_ADDED,
-    MDNS_CACHE_UPDATED,
-    MDNS_CACHE_REMOVED,
-    MDNS_CACHE_ERROR,
+    MDNS_CACHE_NO_CHANGE,   /*!< no change to the cache */
+    MDNS_CACHE_ADDED,       /*!< new `mdns_cache_entry_t` appended to the cache */
+    MDNS_CACHE_UPDATED,     /*!< existing cache entry updated */
+    MDNS_CACHE_REMOVED,     /*!< existing cache entry removed */
+    MDNS_CACHE_ERROR,       /*!< error occurred while updating the cache */
 } mdns_cache_update_result_t;

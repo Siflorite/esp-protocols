@@ -937,7 +937,6 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
                 }
                 if (browse_for_ptr) {
                     packet_browse = browse_for_ptr;
-                    printf("PTR ttl: %" PRIu32 "\n", ttl);
                     (void)mdns_priv_cache_update_ptr(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol,
                                                      name->host, browse_for_ptr->service, browse_for_ptr->proto,
                                                      browse_for_ptr->subtype, ttl);
@@ -1318,9 +1317,8 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
         mdns_priv_create_answer_from_parsed_packet(parsed_packet);
     }
 
-    mdns_priv_cache_process_dirty();
-
 clear_rx_packet:
+    mdns_priv_cache_process_dirty();
     while (parsed_packet->questions) {
         mdns_parsed_question_t *question = parsed_packet->questions;
         parsed_packet->questions = parsed_packet->questions->next;

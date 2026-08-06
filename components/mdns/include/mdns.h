@@ -1045,16 +1045,12 @@ esp_err_t mdns_netif_action(esp_netif_t *esp_netif, mdns_event_actions_t event_a
  * @return mdns_browse_t pointer to new browse object if initiated successfully.
  *         NULL otherwise.
  *
- * @note When several service instances share the same SRV target hostname, A/AAAA
- *       addresses from a response are attached only to the first matching browse
- *       result for that hostname (per interface and IP protocol). Other instances
- *       with the same target host are not populated automatically; applications
- *       that need host-level addresses for every instance must resolve or cache
- *       them separately until this behavior is improved.
+ * @note If matching services already present in the internal mDNS cache,
+ *       the notifier will be called once for each cached service after this browse
+ *       is registered.
  *
- * @note If one response packet contains answers for multiple active browses,
- *       only one browse is synchronized for that packet. This should not affect
- *       typical browse traffic, where packets answer one service type.
+ * @note The notifier receives a temporary result that is valid only during the callback. 
+ *       See @ref mdns_browse_notify_t for ownership and lifetime details.
  */
 mdns_browse_t *mdns_browse_new(const char *service, const char *proto, mdns_browse_notify_t notifier);
 
@@ -1068,6 +1064,13 @@ mdns_browse_t *mdns_browse_new(const char *service, const char *proto, mdns_brow
  * @param notifier The callback which will be called when the browsing service changed.
  * @return mdns_browse_t pointer to new browse object if initiated successfully.
  *         NULL otherwise.
+ *
+ * @note If matching services already present in the internal mDNS cache,
+ *       the notifier will be called once for each cached service after this browse
+ *       is registered.
+ *
+ * @note The notifier receives a temporary result that is valid only during the callback. 
+ *       See @ref mdns_browse_notify_t for ownership and lifetime details.
  */
 mdns_browse_t *mdns_browse_new_with_subtype(const char *service, const char *proto, const char *subtype, mdns_browse_notify_t notifier);
 

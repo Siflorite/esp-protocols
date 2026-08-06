@@ -127,6 +127,10 @@ void mdns_priv_browse_free(void)
     }
 }
 
+/**
+ * @brief Check if two browses are the same.
+ *        Compare service, proto, and possible subtype.
+ */
 static bool browse_match(const mdns_browse_t *a, const mdns_browse_t *b)
 {
     if (strlen(a->service) != strlen(b->service) || memcmp(a->service, b->service, strlen(a->service)) != 0) {
@@ -144,11 +148,15 @@ static bool browse_match(const mdns_browse_t *a, const mdns_browse_t *b)
     return (strlen(a->subtype) == strlen(b->subtype) && memcmp(a->subtype, b->subtype, strlen(a->subtype)) == 0);
 }
 
+/**
+ * @brief Check if a browse `_service._proto` is running.
+ */
 static bool browse_has_service(const char *service, const char *proto)
 {
     for (const mdns_browse_t *it = s_browse; it; it = it->next) {
         if (it->state == BROWSE_RUNNING && !mdns_utils_str_null_or_empty(it->service)
-                && !mdns_utils_str_null_or_empty(it->proto) && !strcasecmp(service, it->service) && !strcasecmp(proto, it->proto)) {
+                && !mdns_utils_str_null_or_empty(it->proto) && !strcasecmp(service, it->service) 
+                && !strcasecmp(proto, it->proto)) {
             return true;
         }
     }
@@ -162,7 +170,7 @@ static void browse_finish(mdns_browse_t *browse)
 {
     bool removed = false;
     browse->state = BROWSE_OFF;
-    ESP_LOGI(TAG, "Browse finished: %s, %s, %s", browse->service, browse->proto, browse->subtype);
+
     for (mdns_browse_t *it = s_browse; it; it = it->next) {
         if (browse_match(it, browse)) {
             queueDetach(mdns_browse_t, s_browse, it);
@@ -173,12 +181,9 @@ static void browse_finish(mdns_browse_t *browse)
     }
 
     if (removed) {
-        ESP_LOGI(TAG, "Browse removed: %s, %s, %s", browse->service, browse->proto, browse->subtype);
         if (!browse_has_service(browse->service, browse->proto)) {
-            ESP_LOGI(TAG, "Service caches to be removed: %s, %s", browse->service, browse->proto);
             mdns_priv_remove_service_caches(browse->service, browse->proto);
         } else if (!mdns_utils_str_null_or_empty(browse->subtype)) {
-            ESP_LOGI(TAG, "Subtype to be removed: %s, %s, %s", browse->service, browse->proto, browse->subtype);
             mdns_priv_service_cache_remove_subtype(browse->service, browse->proto, browse->subtype);
         }
     }
@@ -256,8 +261,6 @@ static void browse_add(mdns_browse_t *browse)
             browse_send(browse, (mdns_if_t) interface_idx, (mdns_ip_protocol_t) protocol_idx);
         }
     }
-
-    ESP_LOGI(TAG, "Browse added: %s, %s, %s", browse->service, browse->proto, browse->subtype);
 }
 
 static esp_err_t add_browse_result(mdns_browse_sync_t *sync_browse, mdns_result_t *r);
@@ -333,7 +336,8 @@ mdns_browse_t *mdns_priv_browse_find(mdns_name_t *name, uint16_t type, mdns_if_t
             }
             return b;
         } else if (type == MDNS_TYPE_A || type == MDNS_TYPE_AAAA) {
-            if (mdns_priv_host_has_service(name->host, mdns_priv_get_esp_netif(tcpip_if), ip_protocol, b->service, b->proto)) {
+            if (mdns_priv_host_has_service(name->host, mdns_priv_get_esp_netif(tcpip_if),
+                                           ip_protocol, b->service, b->proto)) {
                 return b;
             }
             b = b->next;
@@ -457,6 +461,9 @@ esp_err_t mdns_priv_browse_sync(mdns_browse_sync_t *browse_sync)
     return ESP_OK;
 }
 
+/**
+ * @brief Check if a running browse `_service._proto` matches a service cache `_service._proto`.
+ */
 static bool browse_matches_service_cache(const mdns_browse_t *browse, const mdns_service_cache_t *service)
 {
     return browse && service && browse->state == BROWSE_RUNNING && browse->notifier
@@ -468,6 +475,9 @@ static bool browse_matches_service_cache(const mdns_browse_t *browse, const mdns
            && !strcasecmp(browse->proto, service->proto);
 }
 
+/**
+ * @brief Check if a service cache has a specific subtype.
+ */
 static bool service_cache_has_subtype(const mdns_service_cache_t *service, const char *subtype)
 {
     if (!service || mdns_utils_str_null_or_empty(subtype)) {
@@ -483,6 +493,9 @@ static bool service_cache_has_subtype(const mdns_service_cache_t *service, const
     return false;
 }
 
+/**
+ * @brief Check if a running browse matches a service cache with service name, proto, and possible subtype.
+ */
 static bool browse_matches_service_cache_with_subtype(const mdns_browse_t *browse, const mdns_service_cache_t *service)
 {
     if (!browse_matches_service_cache(browse, service)) {
@@ -496,6 +509,9 @@ static bool browse_matches_service_cache_with_subtype(const mdns_browse_t *brows
     return service_cache_has_subtype(service, browse->subtype);
 }
 
+/**
+ * @brief Build and sync a temporary result for a browse from cache.
+ */
 static bool browse_build_and_sync_temp_result(mdns_browse_t *browse, const mdns_cache_entry_t *entry,
                                               const mdns_service_cache_t *service, bool goodbye)
 {

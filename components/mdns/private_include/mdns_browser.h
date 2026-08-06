@@ -90,7 +90,8 @@ bool mdns_priv_browse_update_from_service_cache(const mdns_cache_entry_t *entry,
  *
  * @return true if browse is successfully notified, false otherwise
  */
-bool mdns_priv_browse_notify_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service, mdns_browse_t *browse);
+bool mdns_priv_browse_notify_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service,
+                                                mdns_browse_t *browse);
 
 /**
  * @brief Notify the affected normal/subtype browse about a PTR goodbye.
