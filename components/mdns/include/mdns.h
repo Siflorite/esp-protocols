@@ -141,28 +141,18 @@ typedef void (*mdns_query_notify_t)(mdns_search_once_t *search);
 /**
  * @brief Browse result change notifier
  *
- * Called once per browse result that changed in a given response packet (not
- * once per packet). The @p result argument points at the changed entry, but it
- * remains a live node in the internal browse cache until the callback returns.
+ * Called once for every matching browse result changed by a received response,
+ * or once for every currently cached result when a new browse is registered.
  *
- * @warning @p result->next links other cached instances for this browse, not
- *          necessarily other results that changed in the same packet. For
- *          ordinary add/update notifications, use only @p result; do not walk
- *          @c next, because unchanged instances may appear there.
+ * The @p result is a temporary projection of the internal mDNS cache, which is only valid
+ * during the lifetime of this callback and is freed immediately after the callback returns.
  *
- * @warning Batch PTR TTL=0 ("goodbye") responses (for example when a peer
- *          exits and Bonjour sends many removals in one packet) may invoke the
- *          notifier once while several instances in the cache are updated.
- *          Until this is improved, applications may walk @c next and treat
- *          entries with @c ttl == 0 as removals. Do not assume every node on
- *          @c next changed in the current packet.
+ * @warning @p result->next is always NULL. Other instances cannot be obtained from @p result.
  *
- * @warning If handling is deferred outside this callback, copy @p result first
- *          (including strings and addresses). Goodbye entries may be freed when
- *          the callback returns.
+ * @warning If handling is deferred outside this callback, applications mut make a deep copy
+ *          of @p result with all components, including strings, TXT entries, and address list.
  *
- * @param result  The browse result that changed. See the warnings above for
- *                use of @c result->next.
+ * @param result  Temporary result of the browse that changed.
  */
 typedef void (*mdns_browse_notify_t)(mdns_result_t *result);
 

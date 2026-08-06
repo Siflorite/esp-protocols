@@ -36,18 +36,6 @@ mdns_browse_t *mdns_priv_browse_find(mdns_name_t *name, uint16_t type, mdns_if_t
 mdns_browse_t *mdns_priv_browse_find_ptr(mdns_name_t *name);
 
 /**
- * @brief Packet-scoped staging for browse A/AAAA records received before SRV
- */
-typedef struct mdns_browse_staged_ip {
-    struct mdns_browse_staged_ip *next;
-    char hostname[MDNS_NAME_BUF_LEN];
-    esp_ip_addr_t ip;
-    mdns_if_t tcpip_if;
-    mdns_ip_protocol_t ip_protocol;
-    uint32_t ttl;
-} mdns_browse_staged_ip_t;
-
-/**
  * @brief Allocate or return existing browse sync object for a packet
  */
 mdns_browse_sync_t *mdns_priv_browse_ensure_sync(mdns_browse_t *browse, mdns_browse_sync_t *sync);
@@ -56,33 +44,6 @@ mdns_browse_sync_t *mdns_priv_browse_ensure_sync(mdns_browse_t *browse, mdns_bro
  * @brief Free browse sync object and its pending result list
  */
 void mdns_priv_browse_sync_free(mdns_browse_sync_t *browse_sync);
-
-/**
- * @brief Stage an A/AAAA record to apply after all packet records are parsed
- */
-esp_err_t mdns_priv_browse_stage_ip(mdns_browse_staged_ip_t **staged, const char *hostname, esp_ip_addr_t *ip,
-                                    mdns_if_t tcpip_if, mdns_ip_protocol_t ip_protocol, uint32_t ttl);
-
-/**
- * @brief Apply staged A/AAAA records once SRV/hostnames are known
- *
- * @note Delegates to mdns_priv_browse_result_add_ip(), which updates only the
- *       first matching instance per hostname; see mdns_browse_new() in mdns.h.
- */
-void mdns_priv_browse_apply_staged_ips(mdns_browse_t *browse, mdns_browse_staged_ip_t *staged,
-                                       mdns_browse_sync_t *out_sync_browse);
-
-/**
- * @brief Free staged A/AAAA list
- */
-void mdns_priv_browse_staged_ip_free(mdns_browse_staged_ip_t *staged);
-
-/**
- * @brief Add a PTR record to the browse result (including TTL=0 removal)
- */
-void mdns_priv_browse_result_add_ptr(mdns_browse_t *browse, const char *instance, const char *service, const char *proto,
-                                     mdns_if_t tcpip_if, mdns_ip_protocol_t ip_protocol, uint32_t ttl,
-                                     mdns_browse_sync_t *out_sync_browse);
 
 /**
  * @brief Send out all browse queries
@@ -116,50 +77,31 @@ esp_err_t mdns_priv_browse_sync(mdns_browse_sync_t *browse_sync);
 void mdns_priv_browse_action(mdns_action_t *action, mdns_action_subtype_t type);
 
 /**
- * @brief  Add a TXT record to the browse result
- *
- * @note Called from the packet parser (mdns_receive.c)
- */
-void mdns_priv_browse_result_add_txt(mdns_browse_t *browse, const char *instance, const char *service, const char *proto,
-                                     mdns_txt_item_t *txt, uint8_t *txt_value_len, size_t txt_count, mdns_if_t tcpip_if, mdns_ip_protocol_t ip_protocol,
-                                     uint32_t ttl, mdns_browse_sync_t *out_sync_browse);
-/**
- * @brief  Add an IP record to the browse result
- *
- * @note Called from the packet parser (mdns_receive.c)
- * @note Attaches @p ip only to the first browse result with matching @p hostname
- *       on the given interface and IP protocol; see mdns_browse_new() in mdns.h.
- */
-void mdns_priv_browse_result_add_ip(mdns_browse_t *browse, const char *hostname, esp_ip_addr_t *ip,
-                                    mdns_if_t tcpip_if, mdns_ip_protocol_t ip_protocol, uint32_t ttl, mdns_browse_sync_t *out_sync_browse);
-/**
- * @brief  Add a SRV record to the browse result
- *
- * @note Called from the packet parser (mdns_receive.c)
- */
-void mdns_priv_browse_result_add_srv(mdns_browse_t *browse, const char *hostname, const char *instance, const char *service, const char *proto,
-                                     uint16_t port, mdns_if_t tcpip_if, mdns_ip_protocol_t ip_protocol, uint32_t ttl, mdns_browse_sync_t *out_sync_browse);
-
-/**
  * @brief  Update the result components of browsers from dirty service cache
  *
  * @note Called from mdns_priv_cache_process_dirty() in mdns_cache.c
+ *
+ * @return true if at least one browse has been updated, false otherwise
  */
 bool mdns_priv_browse_update_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service);
 
 /**
- * @brief  Removes a browser result with corresponding service cache entry and subtype
+ * @brief Notify one browse about one visible cache service.
  *
- * @note Called from PTR TTL=0 event handlers in mdns_cache.c
+ * @return true if browse is successfully notified, false otherwise
  */
-void mdns_priv_browse_remove_result_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service, const char *subtype);
+bool mdns_priv_browse_notify_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service, mdns_browse_t *browse);
 
 /**
- * @brief  Removes all browser results with corresponding service cache entry
+ * @brief Notify the affected normal/subtype browse about a PTR goodbye.
  *
- * @note  Called only when an entire cache entry is removed
+ * @param subtype NULL: normal PTR goodbye; non-NULL: subtype PTR goodbye.
+ *
+ * @note Must be called before the PTR/subtype is removed from the cache to avoid UAF.
  */
-void mdns_priv_browse_remove_all_results_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service);
+bool mdns_priv_browse_notify_ptr_goodbye_from_service_cache(const mdns_cache_entry_t *entry,
+                                                            const mdns_service_cache_t *service,
+                                                            const char *subtype);
 #ifdef __cplusplus
 }
 #endif

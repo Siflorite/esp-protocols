@@ -363,7 +363,6 @@ typedef struct mdns_browse_s {
     char *service;
     char *proto;
     char *subtype;
-    mdns_result_t *result;
 } mdns_browse_t;
 
 typedef struct mdns_browse_result_sync_t {

@@ -534,6 +534,12 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
             return MDNS_CACHE_NO_CHANGE;
         }
 
+        // Notify PTR goodbye before PTR/subtype is removed from the cache.
+        bool notified = mdns_priv_browse_notify_ptr_goodbye_from_service_cache(owner_entry, service_entry, subtype);
+        if (!notified) {
+            ESP_LOGE(TAG, "Failed to notify PTR goodbye");
+        }
+
         if (!mdns_utils_str_null_or_empty(subtype)) {
             if (!service_cache_remove_subtype(service_entry, subtype)) {
                 return MDNS_CACHE_NO_CHANGE;
@@ -546,7 +552,6 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
             service_entry->ptr_ttl = 0;
         }
 
-        mdns_priv_browse_remove_result_from_service_cache(owner_entry, service_entry, mdns_utils_str_null_or_empty(subtype) ? NULL : subtype);
         service_entry->dirty = true;
         if (service_cache_is_empty(service_entry)) {
             return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
@@ -641,7 +646,6 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
         service_entry->dirty = true;
 
         if (service_cache_is_empty(service_entry)) {
-            mdns_priv_browse_remove_all_results_from_service_cache(owner_entry, service_entry);
             return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
         }
         return MDNS_CACHE_UPDATED;
@@ -796,7 +800,6 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
         service_entry->dirty = true;
 
         if (service_cache_is_empty(service_entry)) {
-            mdns_priv_browse_remove_all_results_from_service_cache(owner_entry, service_entry);
             return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
         }
         return MDNS_CACHE_UPDATED;
@@ -1079,147 +1082,19 @@ void mdns_priv_cache_process_dirty(void)
     }
 }
 
-mdns_result_t *mdns_priv_cache_to_result(const mdns_browse_t *browse)
+bool mdns_priv_cache_notify_browse(mdns_browse_t *browse)
 {
-    mdns_result_t *results = NULL;
     if (!browse) {
-        return NULL;
+        return false;
     }
+
+    bool notified = true;
 
     for (mdns_cache_entry_t *entry = s_cache; entry; entry = entry->next) {
         for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
-            if (!service_cache_matches_browse(service, browse)) {
-                continue;
-            }
-
-            mdns_result_t *r = mdns_priv_service_cache_to_result(entry, service);
-            if (!r) {
-                mdns_priv_query_results_free(results);
-                return NULL;
-            }
-
-            r->next = results;
-            results = r;
-        }
-    }
-    return results;
-}
-
-static bool addr_in_list(const esp_ip_addr_t *addr, const mdns_ip_addr_t *addr_list)
-{
-    for (const mdns_ip_addr_t *a = addr_list; a; a = a->next) {
-        if (addr_equal(&a->addr, addr)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-static bool txt_in_list(const mdns_txt_item_t *txt, uint8_t value_len, const mdns_txt_item_t *txt_list, size_t count)
-{
-    for (size_t i = 0; i < count; i++) {
-        if (names_equal(txt->key, txt_list[i].key)) {
-            if (!txt->value && !txt_list[i].value) {
-                return true;
-            }
-            if (!txt->value || !txt_list[i].value) {
-                return false;
-            }
-            if (memcmp(txt->value, txt_list[i].value, value_len) == 0) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-static bool result_equals(const mdns_result_t *a, const mdns_result_t *b)
-{
-    if (a->esp_netif != b->esp_netif) {
-        return false;
-    }
-    if (a->ttl != b->ttl) {
-        return false;
-    }
-    if (a->ip_protocol != b->ip_protocol) {
-        return false;
-    }
-    if (!nullable_names_equal(a->instance_name, b->instance_name)) {
-        return false;
-    }
-    if (!nullable_names_equal(a->service_type, b->service_type)) {
-        return false;
-    }
-    if (!nullable_names_equal(a->proto, b->proto)) {
-        return false;
-    }
-    if (!nullable_names_equal(a->hostname, b->hostname)) {
-        return false;
-    }
-    if (a->port != b->port) {
-        return false;
-    }
-    if (a->txt_count != b->txt_count) {
-        return false;
-    }
-    for (size_t i = 0; i < a->txt_count; i++) {
-        if (!txt_in_list(&a->txt[i], a->txt_value_len[i], b->txt, b->txt_count)) {
-            return false;
-        }
-    }
-    for (const mdns_ip_addr_t *addr = a->addr; addr; addr = addr->next) {
-        if (!addr_in_list(&addr->addr, b->addr)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void mdns_priv_cache_verify_browse_result(const mdns_browse_t *browse)
-{
-#ifdef CONFIG_MDNS_CACHE_DEBUG
-    mdns_result_t *results_from_cache = mdns_priv_cache_to_result(browse);
-    if (!results_from_cache) {
-        ESP_LOGW(TAG, "No results found in cache for browse %s", browse->service);
-        return;
-    }
-    const mdns_result_t *results_from_browse = browse->result;
-
-    ESP_LOGI(TAG, "==== cache vs browse verify (%s.%s subtype=%s) ====",
-             browse->service, browse->proto,
-             browse->subtype ? browse->subtype : "<none>");
-
-    const mdns_result_t *it_c = results_from_cache;
-    const mdns_result_t *it_b = results_from_browse;
-    int count_c = 0;
-    int count_b = 0;
-    while (it_c) {
-        count_c++;
-        it_c = it_c->next;
-    }
-    while (it_b) {
-        count_b++;
-        it_b = it_b->next;
-    }
-
-    if (count_c != count_b) {
-        ESP_LOGW(TAG, "Cache and browse results have different lengths: %d vs %d", count_c, count_b);
-        return;
-    }
-
-    for (const mdns_result_t *cr = results_from_cache; cr; cr = cr->next) {
-        bool found = false;
-        for (const mdns_result_t *br = results_from_browse; br; br = br->next) {
-            if (result_equals(cr, br)) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            ESP_LOGW(TAG, "Result not found in browse: %s", cr->instance_name);
+            notified &= mdns_priv_browse_notify_from_service_cache(entry, service, browse);
         }
     }
 
-    mdns_priv_query_results_free(results_from_cache);
-#endif
+    return notified;
 }

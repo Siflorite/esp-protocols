@@ -28,9 +28,12 @@ void mdns_priv_cache_clear(void);
 mdns_result_t *mdns_priv_service_cache_to_result(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service);
 void mdns_priv_cache_process_dirty(void);
 
-
-mdns_result_t *mdns_priv_cache_to_result(const mdns_browse_t *browse);
-void mdns_priv_cache_verify_browse_result(const mdns_browse_t *browse);
+/**
+ * @brief Replay all currently visible cache services to a newly registered browse.
+ *
+ * @return true if successfully notified, false otherwise
+ */
+bool mdns_priv_cache_notify_browse(mdns_browse_t *browse);
 #ifdef __cplusplus
 }
 #endif
