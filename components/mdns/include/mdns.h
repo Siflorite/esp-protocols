@@ -134,6 +134,8 @@ typedef struct mdns_result_s {
     size_t txt_count;                       /*!< number of txt items */
     // A and AAAA
     mdns_ip_addr_t *addr;                   /*!< linked list of IP addresses found */
+    // Browse only
+    char *subtype;                          /*!< browse subtype, or NULL for normal browse */
 } mdns_result_t;
 
 typedef void (*mdns_query_notify_t)(mdns_search_once_t *search);
@@ -150,7 +152,7 @@ typedef void (*mdns_query_notify_t)(mdns_search_once_t *search);
  * @warning @p result->next is always NULL. Other instances cannot be obtained from @p result.
  *
  * @warning If handling is deferred outside this callback, applications mut make a deep copy
- *          of @p result with all components, including strings, TXT entries, and address list.
+ *          of @p result with all components, including strings, TXT entries, address list, and subtype.
  *
  * @param result  Temporary result of the browse that changed.
  */

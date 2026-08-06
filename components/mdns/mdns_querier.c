@@ -34,6 +34,7 @@ void mdns_priv_query_results_free(mdns_result_t *results)
         mdns_mem_free((char *)(r->instance_name));
         mdns_mem_free((char *)(r->service_type));
         mdns_mem_free((char *)(r->proto));
+        mdns_mem_free((char *)(r->subtype));
 
         for (size_t i = 0; i < r->txt_count; i++) {
             mdns_mem_free((char *)(r->txt[i].key));

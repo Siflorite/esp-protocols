@@ -504,6 +504,15 @@ static bool browse_build_and_sync_temp_result(mdns_browse_t *browse, const mdns_
         return false;
     }
 
+    if (!mdns_utils_str_null_or_empty(browse->subtype)) {
+        result->subtype = mdns_mem_strdup(browse->subtype);
+        if (!result->subtype) {
+            HOOK_MALLOC_FAILED;
+            mdns_priv_query_results_free(result);
+            return false;
+        }
+    }
+
     result->next = NULL;
     if (goodbye) {
         result->ttl = 0;
