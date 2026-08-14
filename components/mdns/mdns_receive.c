@@ -1002,7 +1002,7 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
                     packet_browse = browse_for_ptr;
                     (void)mdns_priv_cache_update_ptr(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol,
                                                      name->host, browse_for_ptr->service, browse_for_ptr->proto,
-                                                     ttl);
+                                                     browse_for_ptr->subtype, ttl);
                 } else if (search_result) {
 #else
                 if (search_result) {

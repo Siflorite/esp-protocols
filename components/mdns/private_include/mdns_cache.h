@@ -27,26 +27,56 @@ bool mdns_priv_cache_host_has_service(const char *hostname, const esp_netif_t *e
                                       const char *service, const char *proto);
 
 /**
- * @brief Update a PTR record for service cache `_service._proto`.
+ * @brief Check if a subtype exists in a service cache and is pending sync.
+ *
+ * @param service Pointer to the service cache.
+ * @param subtype The subtype to check.
+ *
+ * @return true if the subtype exists in the service cache and is pending sync, false otherwise.
+ */
+bool mdns_priv_cache_service_subtype_is_pending_sync(const mdns_service_cache_t *service, const char *subtype);
+
+/**
+ * @brief Remove a base PTR record or subtype record from service caches matching `_service._proto`.
+ *
+ *
+ * @note If @ref subtype is null, only remove base PTR record `ptr_present` and `ptr_ttl`.
+ *       Otherwise, only remove the specific subtype from the service cache.
+ *
+ * @note The service cache will be removed if it becomes empty after the removal.
+ *
+ * @param service       Service name.
+ * @param proto         Protocol name.
+ * @param subtype       Optional subtype name. NULL or empty string to remove base PTR record.
+ */
+void mdns_priv_cache_service_remove_ptr(const char *service, const char *proto, const char *subtype);
+
+/**
+ * @brief Update a PTR record for service cache `_service._proto` with possible subtype.
  *
  * @param esp_netif     Pointer to the esp_netif.
  * @param ip_protocol   IP protocol.
  * @param instance      The instance name.
  * @param service       The service name.
  * @param proto         The protocol.
+ * @param subtype       The subtype.
  * @param ttl           The PTR TTL.
  *
  * @return The result of the update, see @ref mdns_cache_update_result_t.
  *
  * @note The PTR record will be marked to-sync when:
  *      - A new service is added to the cache.
+ *      - A new subtype is appended to the service cache.
  *      - The PTR TTL is updated.
- *      - Receives a TTL=0 goodbye: all subscribing browsers will be notified of the goodbye.
- *        Then the whole service cache entry will be removed.
+ *      - Receives a TTL=0 goodbye:
+ *          - If @ref subtype is not null and the service cache has this subtype,
+ *            the subtype will be removed from subtype list of this service cache.
+ *          - If @ref subtype is null, all subscribing browsers will be notified of the goodbye.
+ *            Then the whole service cache entry will be removed.
  */
 mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol,
                                                       const char *instance, const char *service, const char *proto,
-                                                      uint32_t ttl);
+                                                      const char *subtype, uint32_t ttl);
 
 /**
  * @brief Update a SRV record for service cache `instance._service._proto`.

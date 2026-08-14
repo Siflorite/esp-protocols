@@ -38,7 +38,7 @@ bool mdns_priv_browse_has_service(const char *service, const char *proto);
 mdns_browse_t *mdns_priv_browse_find(mdns_name_t *name, uint16_t type, mdns_if_t tcpip_if, mdns_ip_protocol_t ip_protocol);
 
 /**
- * @brief Looks for an active browse matching a PTR owner name (service._proto.local)
+ * @brief Looks for an active browse matching a PTR owner name (service._proto.local, or with subtype _subtype._sub.service._proto.local)
  *
  * @note Called from the packet parser (mdns_receive.c)
  */
@@ -90,12 +90,15 @@ bool mdns_priv_browse_notify_from_service_cache(const mdns_cache_entry_t *entry,
                                                 mdns_browse_t *browse);
 
 /**
- * @brief Notify the affected browse about a PTR goodbye.
+ * @brief Notify the affected normal/subtype browse about a PTR goodbye.
  *
- * @note Must be called before the PTR service cache is removed to avoid UAF.
+ * @param The subtype for PTR goodbye record, can be NULL if PTR record has no subtype.
+ *
+ * @note Must be called before the PTR/subtype is removed from the cache to avoid UAF.
  */
 bool mdns_priv_browse_notify_ptr_goodbye_from_service_cache(const mdns_cache_entry_t *entry,
-                                                            const mdns_service_cache_t *service);
+                                                            const mdns_service_cache_t *service,
+                                                            const char *subtype);
 #ifdef __cplusplus
 }
 #endif
