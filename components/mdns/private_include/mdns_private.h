@@ -156,7 +156,7 @@ typedef enum {
     ACTION_SEARCH_ADD,
     ACTION_SEARCH_SEND,
     ACTION_SEARCH_END,
-    ACTION_BROWSE_ADD,
+    ACTION_BROWSE_START,
     ACTION_BROWSE_SYNC,
     ACTION_BROWSE_END,
     ACTION_TX_HANDLE,
@@ -412,6 +412,25 @@ typedef struct {
     } data;
 } mdns_action_t;
 
+typedef enum {
+    MDNS_CACHE_CONSUMER_BROWSE     = (1U << 0),
+    MDNS_CACHE_CONSUMER_RESOLVER   = (1U << 1)
+} mdns_cache_consumer_type_t;
+
+typedef uint8_t mdns_cache_consumer_mask_t;
+
+typedef enum {
+    MDNS_CACHE_RECORD_PTR       = (1U << 0),
+    MDNS_CACHE_RECORD_SUBTYPE   = (1U << 1),
+    MDNS_CACHE_RECORD_SRV       = (1U << 2),
+    MDNS_CACHE_RECORD_TXT       = (1U << 3),
+    MDNS_CACHE_RECORD_ADDR      = (1U << 4)
+} mdns_cache_record_type_t;
+
+typedef uint8_t mdns_cache_record_mask_t;
+
+#define MDNS_CACHE_RECORD_RESOLVER_MASK ((mdns_cache_record_mask_t)(MDNS_CACHE_RECORD_SRV | MDNS_CACHE_RECORD_TXT \
+                                                                    | MDNS_CACHE_RECORD_ADDR))
 
 /**
  * @brief   mDNS cache PTR subtype structure
@@ -453,8 +472,9 @@ typedef struct mdns_service_cache_s {
     bool txt_present;   /*!< true if TXT record is present */
     mdns_txt_linked_item_t *txt_list;
     uint32_t txt_ttl;
-    // Dirty flag
-    bool dirty;         /*!< true if the service cache is modified but not yet notified */
+    // To-sync flags
+    mdns_cache_record_mask_t sync_records;      /*!< bitmask of records to sync, see @ref mdns_cache_record_type_t */
+    mdns_cache_consumer_mask_t sync_consumers;  /*!< bitmask of consumers to sync, see @ref mdns_cache_consumer_type_t */
     struct mdns_service_cache_s *next;
 } mdns_service_cache_t;
 
@@ -467,6 +487,7 @@ typedef struct mdns_cache_entry_s {
     mdns_ip_protocol_t ip_protocol;
 
     mdns_cache_addr_t *addr_list;
+    bool addr_list_sync; /*!< true if the address list is to be synced, reserved for host-level ADDR resolvers */
     mdns_service_cache_t *service_cache_list;
     struct mdns_cache_entry_s *next;
 } mdns_cache_entry_t;
@@ -476,8 +497,8 @@ typedef struct mdns_cache_entry_s {
  */
 typedef enum {
     MDNS_CACHE_NO_CHANGE,   /*!< no change to the cache */
-    MDNS_CACHE_ADDED,       /*!< new `mdns_cache_entry_t` appended to the cache */
-    MDNS_CACHE_UPDATED,     /*!< existing cache entry updated */
-    MDNS_CACHE_REMOVED,     /*!< existing cache entry removed */
+    MDNS_CACHE_ADDED,       /*!< new cache entry or service cache appended */
+    MDNS_CACHE_UPDATED,     /*!< existing service cache entry updated */
+    MDNS_CACHE_REMOVED,     /*!< existing service cache entry removed */
     MDNS_CACHE_ERROR,       /*!< error occurred while updating the cache */
 } mdns_cache_update_result_t;

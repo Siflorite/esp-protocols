@@ -1318,7 +1318,7 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
     }
 
 clear_rx_packet:
-    mdns_priv_cache_process_dirty();
+    mdns_priv_cache_process_sync();
     while (parsed_packet->questions) {
         mdns_parsed_question_t *question = parsed_packet->questions;
         parsed_packet->questions = parsed_packet->questions->next;

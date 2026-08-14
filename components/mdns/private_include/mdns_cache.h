@@ -14,7 +14,7 @@ extern "C" {
 
 /**
  * @brief Find a cache entry by hostname, esp_netif, and ip_protocol.
- * 
+ *
  * @param hostname      The hostname to find.
  * @param esp_netif     Pointer to the esp_netif to find.
  * @param ip_protocol   IP protocol to find.
@@ -26,7 +26,7 @@ mdns_cache_entry_t *mdns_priv_cache_find_entry(const char *hostname, const esp_n
 
 /**
  * @brief Find a service cache entry by esp_netif, ip_protocol, instance, service, and proto.
- * 
+ *
  * @param esp_netif     Pointer to the esp_netif to find.
  * @param ip_protocol   IP protocol to find.
  * @param instance      The instance name to find.
@@ -42,7 +42,7 @@ mdns_service_cache_t *mdns_priv_cache_find_service(const esp_netif_t *esp_netif,
 
 /**
  * @brief Check if a host has a service by hostname, esp_netif, ip_protocol, service, and proto.
- * 
+ *
  * @param hostname      The hostname to check.
  * @param esp_netif     Pointer to the esp_netif to check.
  * @param ip_protocol   IP protocol to check.
@@ -56,7 +56,7 @@ bool mdns_priv_host_has_service(const char *hostname, const esp_netif_t *esp_net
 
 /**
  * @brief Remove all service caches by service and proto.
- * 
+ *
  * @param service       The service name to remove.
  * @param proto         The protocol to remove.
  */
@@ -64,7 +64,7 @@ void mdns_priv_remove_service_caches(const char *service, const char *proto);
 
 /**
  * @brief Remove a subtype from a service cache `_service._proto`.
- * 
+ *
  * @param service       The service name to remove the subtype from.
  * @param proto         The protocol to remove the subtype from.
  * @param subtype       The subtype to remove.
@@ -73,7 +73,7 @@ void mdns_priv_service_cache_remove_subtype(const char *service, const char *pro
 
 /**
  * @brief Update a PTR record for service cache `_service._proto` with possible subtype.
- * 
+ *
  * @param esp_netif     Pointer to the esp_netif.
  * @param ip_protocol   IP protocol.
  * @param instance      The instance name.
@@ -84,7 +84,7 @@ void mdns_priv_service_cache_remove_subtype(const char *service, const char *pro
  *
  * @return The result of the update, see @ref mdns_cache_update_result_t.
  *
- * @note The PTR record will be marked dirty when:
+ * @note The PTR record will be marked to-sync when:
  *      - A new service is added to the cache.
  *      - A new subtype is appended to the service cache.
  *      - The PTR TTL is updated.
@@ -99,7 +99,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
 
 /**
  * @brief Update a SRV record for service cache `instance._service._proto`.
- * 
+ *
  * @param esp_netif     Pointer to the esp_netif.
  * @param ip_protocol   IP protocol.
  * @param hostname      The hostname to update.
@@ -113,7 +113,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
  *
  * @return The result of the update, see @ref mdns_cache_update_result_t.
  *
- * @note The SRV record will be marked dirty when:
+ * @note The SRV record will be marked to-sync when:
  *      - A new SRV record is added to the service cache.
  *      - The service cache is moved to the host designated by @ref hostname.
  *      - The SRV record is updated.
@@ -126,7 +126,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
 
 /**
  * @brief Update a TXT record for service cache `instance._service._proto`.
- * 
+ *
  * @param esp_netif     Pointer to the esp_netif.
  * @param ip_protocol   IP protocol.
  * @param instance      The instance name.
@@ -137,7 +137,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
  *
  * @return The result of the update, see @ref mdns_cache_update_result_t.
  *
- * @note The TXT record will be marked dirty when:
+ * @note The TXT record will be marked to-sync when:
  *      - A new TXT record is added to the service cache.
  *      - The TXT record is updated.
  *      - Receives a TTL=0 goodbye: the TXT record will be marked as absent.
@@ -148,7 +148,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
 
 /**
  * @brief Update an A/AAAA record for a cache entry `hostname`.
- * 
+ *
  * @param esp_netif     Pointer to the esp_netif.
  * @param ip_protocol   IP protocol.
  * @param hostname      The hostname to update.
@@ -158,7 +158,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
  * @return The result of the update, see @ref mdns_cache_update_result_t.
  *
  * @note When an A/AAAA record is updated (added, removed, or updated),
- *       all services under this cache entry will be marked dirty.
+ *       all services under this cache entry will be marked to-sync for browses.
  */
 mdns_cache_update_result_t mdns_priv_cache_update_addr(const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol,
                                                        const char *hostname, const esp_ip_addr_t *addr, uint32_t ttl);
@@ -170,7 +170,7 @@ void mdns_priv_cache_clear(void);
 
 /**
  * @brief Convert a service cache to a mdns_result_t.
- * 
+ *
  * @param entry       Pointer to the cache entry.
  * @param service     Pointer to the service cache.
  * @return The converted mdns_result_t.
@@ -180,12 +180,12 @@ void mdns_priv_cache_clear(void);
 mdns_result_t *mdns_priv_service_cache_to_result(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service);
 
 /**
- * @brief Process all dirty cache entries.
+ * @brief Process all pending synchronization cache entries.
  *
- * @note This function is called by the MDNS task to process all dirty cache entries.
- *       It will generate temporary results, notify corresponding browsers, and clear the dirty flag.
+ * @note This function is called by the MDNS task to process all pending synchronization cache entries.
+ *       It will generate temporary results, notify corresponding consumers, and clear the sync out flags.
  */
-void mdns_priv_cache_process_dirty(void);
+void mdns_priv_cache_process_sync(void);
 
 /**
  * @brief Replay all currently visible cache services to a newly registered browse.
@@ -193,6 +193,14 @@ void mdns_priv_cache_process_dirty(void);
  * @return true if successfully notified, false otherwise
  */
 bool mdns_priv_cache_notify_browse(mdns_browse_t *browse);
+
+/**
+ * @brief Remove specific service cache entries if no consumers subscribe to them.
+ *
+ * @param service Service name.
+ * @param proto Protocol name.
+ */
+void mdns_priv_cache_remove_service_cache_if_unused(const char *service, const char *proto);
 #ifdef __cplusplus
 }
 #endif

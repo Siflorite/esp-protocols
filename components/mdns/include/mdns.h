@@ -151,8 +151,11 @@ typedef void (*mdns_query_notify_t)(mdns_search_once_t *search);
  *
  * @warning @p result->next is always NULL. Other instances cannot be obtained from @p result.
  *
- * @warning If handling is deferred outside this callback, applications mut make a deep copy
+ * @warning If handling is deferred outside this callback, applications must make a deep copy
  *          of @p result with all components, including strings, TXT entries, address list, and subtype.
+ *
+ * @warning `mdns_browse_new*` APIs will acquire mDNS service lock, and `mdns_browse_notify_t` runs
+ *          in the mDNS service task. Users must not call `mdns_service_new*` APIs from `mdns_browse_notify_t`.
  *
  * @param result  Temporary result of the browse that changed.
  */
@@ -1049,7 +1052,7 @@ esp_err_t mdns_netif_action(esp_netif_t *esp_netif, mdns_event_actions_t event_a
  *       the notifier will be called once for each cached service after this browse
  *       is registered.
  *
- * @note The notifier receives a temporary result that is valid only during the callback. 
+ * @note The notifier receives a temporary result that is valid only during the callback.
  *       See @ref mdns_browse_notify_t for ownership and lifetime details.
  */
 mdns_browse_t *mdns_browse_new(const char *service, const char *proto, mdns_browse_notify_t notifier);
@@ -1069,7 +1072,7 @@ mdns_browse_t *mdns_browse_new(const char *service, const char *proto, mdns_brow
  *       the notifier will be called once for each cached service after this browse
  *       is registered.
  *
- * @note The notifier receives a temporary result that is valid only during the callback. 
+ * @note The notifier receives a temporary result that is valid only during the callback.
  *       See @ref mdns_browse_notify_t for ownership and lifetime details.
  */
 mdns_browse_t *mdns_browse_new_with_subtype(const char *service, const char *proto, const char *subtype, mdns_browse_notify_t notifier);
