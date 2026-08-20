@@ -223,6 +223,9 @@ static void execute_action(mdns_action_t *action)
     case ACTION_RESOLVER_END:
         mdns_priv_resolver_action(action, ACTION_RUN);
         break;
+    case ACTION_RESOLVER_SEND_BY_IP_PROTOCOL:
+        mdns_priv_resolver_send_by_ip_protocol(action->data.resolver_send.interface, action->data.resolver_send.ip_protocol);
+        break;
 #endif
     default:
         break;
