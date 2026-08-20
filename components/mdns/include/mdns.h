@@ -162,6 +162,44 @@ typedef void (*mdns_query_notify_t)(mdns_search_once_t *search);
  */
 typedef void (*mdns_browse_notify_t)(mdns_result_t *result);
 
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+/**
+ * @brief Continuous record resolver handle
+ */
+typedef struct mdns_resolver_s mdns_resolver_t;
+
+/**
+ * @brief PTR resolver result structure.
+ *
+ * TTL=0 refers to a goodbye message.
+ *
+ * @note This structure should be freed by `mdns_ptr_resolver_result_free()`
+ */
+typedef struct mdns_ptr_resolver_result_s {
+    esp_netif_t *esp_netif;                 /*!< ptr to corresponding esp-netif */
+    mdns_ip_protocol_t ip_protocol;         /*!< ip_protocol type of the interface (v4/v6) */
+
+    const char *instance;                   /*!< instance name */
+    const char *service;                    /*!< service type */
+    const char *proto;                      /*!< service protocol */
+    const char *subtype;                    /*!< subtype, can be NULL for base-service PTR */
+
+    uint32_t ttl;                           /*!< time to live */
+} mdns_ptr_resolver_result_t;
+
+/**
+ * @brief PTR resolver result change notifier
+ *
+ * @note Ownership of @p result is transferred to the caller when the callback is invoked.
+ *       Users must free the result with `mdns_ptr_resolver_result_free()` after handling it.
+ *
+ * @warning This callback is called in the mDNS service task.
+ *          Users must not call APIs that acquire mDNS service lock from this callback.
+ *          For example, resolvers new/delete APIs.
+ */
+typedef void (*mdns_ptr_resolver_notify_t)(mdns_ptr_resolver_result_t *result);
+#endif // CONFIG_MDNS_ENABLE_RESOLVER
+
 /**
  * @brief Hostname change notifier
  *
@@ -1143,6 +1181,48 @@ esp_err_t mdns_browse_delete(const char *service, const char *proto);
  */
 esp_err_t mdns_browse_delete_with_subtype(const char *service, const char *proto, const char *subtype);
 #endif /* CONFIG_MDNS_ENABLE_BROWSE */
+
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+/**
+ * @brief Start a continuous PTR resolver for a service `_service._proto` with possible subtype.
+ *
+ * @param service           Service type, e.g. `_http`, `_ftp` etc.
+ * @param proto             Service protocol, e.g. `_tcp`, `_udp` etc.
+ * @param subtype           Subtype, e.g. `_printer` etc. Can be NULL for base-service PTR.
+ * @param notifier          Callback invoked on PTR updates and goodbye messages.
+ *                          See @ref mdns_ptr_resolver_notify_t for callback semantics and limitations.
+ * @return Pointer to the new PTR resolver if initiated successfully.
+ *         NULL otherwise.
+ *
+ * @note Available when CONFIG_MDNS_ENABLE_RESOLVER is enabled (default); can be disabled to reduce binary size.
+ */
+mdns_resolver_t *mdns_ptr_resolver_new(const char *service, const char *proto, const char *subtype,
+                                       mdns_ptr_resolver_notify_t notifier);
+
+/**
+ * @brief Stop the continuous resolver.
+ *
+ * @param resolver Pointer to the resolver to stop.
+ * @return
+ *     - ESP_OK                 success.
+ *     - ESP_ERR_INVALID_ARG    the resolver is NULL.
+ *     - ESP_ERR_NOT_FOUND      the resolver was never started.
+ *     - ESP_ERR_INVALID_STATE  mDNS is not running.
+ *     - ESP_ERR_NO_MEM         no memory for allocation.
+ *
+ * @note Available when CONFIG_MDNS_ENABLE_RESOLVER is enabled (default); can be disabled to reduce binary size.
+ */
+esp_err_t mdns_resolver_delete(mdns_resolver_t *resolver);
+
+/**
+ * @brief Free the PTR resolver result.
+ *
+ * @param result Pointer to the PTR resolver result to free.
+ *
+ * @note Available when CONFIG_MDNS_ENABLE_RESOLVER is enabled (default); can be disabled to reduce binary size.
+ */
+void mdns_ptr_resolver_result_free(mdns_ptr_resolver_result_t *result);
+#endif // CONFIG_MDNS_ENABLE_RESOLVER
 
 #ifdef __cplusplus
 }
