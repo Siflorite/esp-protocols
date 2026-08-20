@@ -21,8 +21,11 @@
 #include "mdns_querier.h"
 #include "mdns_pcb.h"
 #include "mdns_responder.h"
-#ifdef CONFIG_MDNS_ENABLE_BROWSE
+#if defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
 #include "mdns_cache.h"
+#endif
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+#include "mdns_resolver.h"
 #endif
 
 #ifdef CONFIG_MDNS_ENABLE_BROWSE
@@ -1085,6 +1088,9 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
                         }
                     }
                 }
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+                mdns_resolver_t *resolver_result = mdns_priv_resolver_find(name->host, name->service, name->proto, MDNS_RESOLVER_TYPE_SRV);
+#endif
                 bool is_selfhosted = is_name_selfhosted(name);
                 size_t rdata_bound = (size_t)(data_ptr + data_len - data);
                 if (!mdns_utils_parse_fqdn(data, data_ptr + MDNS_SRV_FQDN_OFFSET, name, rdata_bound)) {
@@ -1097,15 +1103,31 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
                 uint16_t weight = mdns_utils_read_u16(data_ptr, MDNS_SRV_WEIGHT_OFFSET);
                 uint16_t port = mdns_utils_read_u16(data_ptr, MDNS_SRV_PORT_OFFSET);
 
+#if defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
+                const char *cache_instance = NULL;
+                const char *cache_service = NULL;
+                const char *cache_proto = NULL;
 #ifdef CONFIG_MDNS_ENABLE_BROWSE
-                if (browse_result && !mdns_utils_str_null_or_empty(browse_result_instance)
-                        && !mdns_utils_str_null_or_empty(browse_result_service)
-                        && !mdns_utils_str_null_or_empty(browse_result_proto)) {
-                    (void)mdns_priv_cache_update_srv(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol,
-                                                     name->host, browse_result_instance, browse_result_service,
-                                                     browse_result_proto, priority, weight, port, ttl);
+                if (browse_result) {
+                    cache_instance = browse_result_instance;
+                    cache_service = browse_result_service;
+                    cache_proto = browse_result_proto;
                 }
 #endif
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+                if (!cache_instance && resolver_result) {
+                    cache_instance = resolver_result->instance_name;
+                    cache_service = resolver_result->service;
+                    cache_proto = resolver_result->proto;
+                }
+#endif
+                if (!mdns_utils_str_null_or_empty(cache_instance) && !mdns_utils_str_null_or_empty(cache_service)
+                        && !mdns_utils_str_null_or_empty(cache_proto)) {
+                    (void)mdns_priv_cache_update_srv(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol,
+                                                     name->host, cache_instance, cache_service,
+                                                     cache_proto, priority, weight, port, ttl);
+                }
+#endif // defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
                 if (search_result) {
                     if (search_result->type == MDNS_TYPE_PTR) {
                         if (!result->hostname) { // assign host/port for this entry only if not previously set
@@ -1392,9 +1414,11 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
 clear_rx_packet:
 #ifdef CONFIG_MDNS_ENABLE_BROWSE
     rx_staged_ips_apply(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol, staged_ips);
-    mdns_priv_cache_process_sync();
     rx_staged_ip_free(staged_ips);
 #endif /* CONFIG_MDNS_ENABLE_BROWSE */
+#if defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
+    mdns_priv_cache_process_sync();
+#endif
     while (parsed_packet->questions) {
         mdns_parsed_question_t *question = parsed_packet->questions;
         parsed_packet->questions = parsed_packet->questions->next;

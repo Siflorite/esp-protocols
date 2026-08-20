@@ -23,7 +23,7 @@
 #include "mdns_querier.h"
 #include "mdns_pcb.h"
 #include "mdns_responder.h"
-#ifdef CONFIG_MDNS_ENABLE_BROWSE
+#if defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
 #include "mdns_cache.h"
 #endif
 #ifdef CONFIG_MDNS_ENABLE_RESOLVER
@@ -459,10 +459,12 @@ void mdns_free(void)
     mdns_priv_query_free();
 #ifdef CONFIG_MDNS_ENABLE_BROWSE
     mdns_priv_browse_free();
-    mdns_priv_cache_clear();
 #endif
 #ifdef CONFIG_MDNS_ENABLE_RESOLVER
     mdns_priv_resolver_free();
+#endif
+#if defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
+    mdns_priv_cache_clear();
 #endif
     mdns_priv_responder_free();
 }

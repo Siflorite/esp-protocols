@@ -174,7 +174,7 @@ static void browse_finish(mdns_browse_t *browse)
             if (!get_non_off_browse_item(it->service, it->proto, it->subtype)) {
                 mdns_priv_cache_service_remove_ptr(it->service, it->proto, it->subtype);
             }
-            mdns_priv_cache_remove_service_cache_if_unused(it->service, it->proto);
+            mdns_priv_cache_remove_service_cache_if_unused(NULL, it->service, it->proto);
 
             browse_item_free(it);
             return;

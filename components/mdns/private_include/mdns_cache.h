@@ -188,20 +188,33 @@ esp_err_t mdns_priv_service_cache_to_result(const mdns_cache_entry_t *entry, con
  */
 void mdns_priv_cache_process_sync(void);
 
+#ifdef CONFIG_MDNS_ENABLE_BROWSE
 /**
  * @brief Replay all currently visible cache services to a newly registered browse.
  *
  * @return true if successfully notified, false otherwise
  */
 bool mdns_priv_cache_notify_browse(mdns_browse_t *browse);
+#endif
+
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+/**
+ * @brief Replay all currently visible cache services to a newly registered resolver.
+ *
+ * @param resolver Pointer to the resolver to notify.
+ * @return true if successfully notified, false otherwise.
+ */
+bool mdns_priv_cache_notify_resolver(mdns_resolver_t *resolver);
+#endif
 
 /**
  * @brief Remove specific service cache entries if no consumers subscribe to them.
  *
+ * @param instance Optional instance name. NULL or empty string to remove all service caches matching `_service._proto`.
  * @param service Service name.
  * @param proto Protocol name.
  */
-void mdns_priv_cache_remove_service_cache_if_unused(const char *service, const char *proto);
+void mdns_priv_cache_remove_service_cache_if_unused(const char *instance, const char *service, const char *proto);
 #ifdef __cplusplus
 }
 #endif
