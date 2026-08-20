@@ -202,6 +202,30 @@ static esp_err_t post_browse_send_by_ip_protocol_action(mdns_if_t mdns_if, mdns_
 }
 #endif
 
+#if defined(CONFIG_MDNS_ENABLE_RESOLVER) && (CONFIG_MDNS_PREDEF_NETIF_STA || CONFIG_MDNS_PREDEF_NETIF_AP || CONFIG_MDNS_PREDEF_NETIF_ETH)
+static esp_err_t post_resolver_send_by_ip_protocol_action(mdns_if_t mdns_if, mdns_ip_protocol_t ip_protocol)
+{
+    if (!mdns_priv_is_server_init() || mdns_if >= MDNS_MAX_INTERFACES) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    mdns_action_t *action = (mdns_action_t *)mdns_mem_calloc(1, sizeof(mdns_action_t));
+    if (!action) {
+        HOOK_MALLOC_FAILED;
+        return ESP_ERR_NO_MEM;
+    }
+    action->type = ACTION_RESOLVER_SEND_BY_IP_PROTOCOL;
+    action->data.resolver_send.interface = mdns_if;
+    action->data.resolver_send.ip_protocol = ip_protocol;
+
+    if (!mdns_priv_queue_action(action)) {
+        mdns_mem_free(action);
+        return ESP_ERR_NO_MEM;
+    }
+    return ESP_OK;
+}
+#endif
+
 /**
  * @brief  Dispatch interface changes based on system events
  */
@@ -286,12 +310,18 @@ static void handle_system_event_for_preset(void *arg, esp_event_base_t event_bas
 #ifdef CONFIG_MDNS_ENABLE_BROWSE
                     post_browse_send_by_ip_protocol_action(mdns_if_from_preset(MDNS_IF_STA), MDNS_IP_PROTOCOL_V4);
 #endif
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+                    post_resolver_send_by_ip_protocol_action(mdns_if_from_preset(MDNS_IF_STA), MDNS_IP_PROTOCOL_V4);
+#endif
                     break;
 #if CONFIG_ETH_ENABLED && CONFIG_MDNS_PREDEF_NETIF_ETH
                 case IP_EVENT_ETH_GOT_IP:
                     post_enable_pcb(MDNS_IF_ETH, MDNS_IP_PROTOCOL_V4);
 #ifdef CONFIG_MDNS_ENABLE_BROWSE
                     post_browse_send_by_ip_protocol_action(mdns_if_from_preset(MDNS_IF_ETH), MDNS_IP_PROTOCOL_V4);
+#endif
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+                    post_resolver_send_by_ip_protocol_action(mdns_if_from_preset(MDNS_IF_ETH), MDNS_IP_PROTOCOL_V4);
 #endif
                     break;
 #endif
@@ -306,7 +336,9 @@ static void handle_system_event_for_preset(void *arg, esp_event_base_t event_bas
 #ifdef CONFIG_MDNS_ENABLE_BROWSE
                     post_browse_send_by_ip_protocol_action(mdns_if, MDNS_IP_PROTOCOL_V6);
 #endif
-
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+                    post_resolver_send_by_ip_protocol_action(mdns_if, MDNS_IP_PROTOCOL_V6);
+#endif
                 }
                 break;
                 default:
