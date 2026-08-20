@@ -68,6 +68,10 @@ static bool resolvers_match(const mdns_resolver_t *a, const mdns_resolver_t *b)
         return names_equal(a->service, b->service)
                && names_equal(a->proto, b->proto)
                && names_equal_nullable(a->subtype, b->subtype);
+    case MDNS_RESOLVER_TYPE_SRV:
+        return names_equal(a->instance, b->instance)
+               && names_equal(a->service, b->service)
+               && names_equal(a->proto, b->proto);
     default:
         return false;
     }
@@ -107,9 +111,11 @@ static void resolver_item_free(mdns_resolver_t *resolver)
         return;
     }
 
+    mdns_mem_free(resolver->instance);
     mdns_mem_free(resolver->service);
     mdns_mem_free(resolver->proto);
     mdns_mem_free(resolver->subtype);
+
     mdns_mem_free(resolver);
 }
 
@@ -123,12 +129,13 @@ void mdns_priv_resolver_free(void)
     s_resolver = NULL;
 }
 
-static void resolver_send_question(char *service, char *proto, char *subtype, uint16_t record_type,
+static void resolver_send_question(char *instance, char *service, char *proto, char *subtype, uint16_t record_type,
                                    mdns_if_t mdns_if, mdns_ip_protocol_t ip_protocol)
 {
     mdns_search_once_t search = {
         .type = record_type,
         .unicast = record_type != MDNS_TYPE_PTR,
+        .instance = instance,
         .service = service,
         .proto = proto,
         .subtype = subtype,
@@ -147,15 +154,18 @@ static void resolver_send(mdns_resolver_t *resolver, mdns_if_t mdns_if, mdns_ip_
     case MDNS_RESOLVER_TYPE_PTR:
         record_type = MDNS_TYPE_PTR;
         break;
+    case MDNS_RESOLVER_TYPE_SRV:
+        record_type = MDNS_TYPE_SRV;
+        break;
     default:
         ESP_LOGE(TAG, "Invalid resolver type: %d", resolver->type);
         return;
     }
 
-    resolver_send_question(resolver->service, resolver->proto, resolver->subtype, record_type, mdns_if, ip_protocol);
+    resolver_send_question(resolver->instance, resolver->service, resolver->proto, resolver->subtype, record_type, mdns_if, ip_protocol);
 }
 
-static mdns_resolver_t *resolver_init(const char *service, const char *proto, const char *subtype,
+static mdns_resolver_t *resolver_init(const char *instance, const char *service, const char *proto, const char *subtype,
                                       mdns_resolver_type_t type)
 {
     mdns_resolver_t *resolver = (mdns_resolver_t *)mdns_mem_calloc(1, sizeof(mdns_resolver_t));
@@ -166,6 +176,15 @@ static mdns_resolver_t *resolver_init(const char *service, const char *proto, co
 
     resolver->type = type;
     resolver->state = RESOLVER_INIT;
+
+    if (!mdns_utils_str_null_or_empty(instance)) {
+        resolver->instance = mdns_mem_strndup(instance, MDNS_NAME_MAX_LEN);
+        if (!resolver->instance) {
+            HOOK_MALLOC_FAILED;
+            resolver_item_free(resolver);
+            return NULL;
+        }
+    }
 
     if (!mdns_utils_str_null_or_empty(service)) {
         resolver->service = mdns_mem_strndup(service, MDNS_NAME_MAX_LEN);
@@ -488,11 +507,8 @@ bool mdns_priv_resolver_notify_goodbye_from_service_cache(const mdns_cache_entry
     return notified;
 }
 
-/**
- * @defgroup MDNS_PUBCLIC_API
- */
-mdns_resolver_t *mdns_ptr_resolver_new(const char *service, const char *proto, const char *subtype,
-                                       mdns_ptr_resolver_notify_t notifier)
+static mdns_resolver_t *resolver_new(const char *instance, const char *service, const char *proto, const char *subtype,
+                                     mdns_resolver_type_t type, void *notifier)
 {
     mdns_resolver_t *resolver = NULL;
 
@@ -501,12 +517,22 @@ mdns_resolver_t *mdns_ptr_resolver_new(const char *service, const char *proto, c
         return NULL;
     }
 
-    resolver = resolver_init(service, proto, subtype, MDNS_RESOLVER_TYPE_PTR);
+    resolver = resolver_init(instance, service, proto, subtype, type);
     if (!resolver) {
         return NULL;
     }
 
-    resolver->notifier.ptr = notifier;
+    switch (type) {
+    case MDNS_RESOLVER_TYPE_PTR:
+        resolver->notifier.ptr = (mdns_ptr_resolver_notify_t)notifier;
+        break;
+    case MDNS_RESOLVER_TYPE_SRV:
+        resolver->notifier.srv = (mdns_srv_resolver_notify_t)notifier;
+        break;
+    default:
+        resolver_item_free(resolver);
+        return NULL;
+    }
 
     mdns_priv_service_lock();
 
@@ -533,6 +559,24 @@ error:
     mdns_priv_service_unlock();
     resolver_item_free(resolver);
     return NULL;
+}
+
+/**
+ * @defgroup MDNS_PUBCLIC_API
+ */
+mdns_resolver_t *mdns_ptr_resolver_new(const char *service, const char *proto, const char *subtype,
+                                       mdns_ptr_resolver_notify_t notifier)
+{
+    return resolver_new(NULL, service, proto, subtype, MDNS_RESOLVER_TYPE_PTR, notifier);
+}
+
+mdns_resolver_t *mdns_srv_resolver_new(const char *instance, const char *service, const char *proto,
+                                       mdns_srv_resolver_notify_t notifier)
+{
+    if (mdns_utils_str_null_or_empty(instance)) {
+        return NULL;
+    }
+    return resolver_new(instance, service, proto, NULL, MDNS_RESOLVER_TYPE_SRV, notifier);
 }
 
 esp_err_t mdns_resolver_delete(mdns_resolver_t *resolver)
@@ -581,5 +625,18 @@ void mdns_ptr_resolver_result_free(mdns_ptr_resolver_result_t *result)
     mdns_mem_free((char *)result->service);
     mdns_mem_free((char *)result->proto);
     mdns_mem_free((char *)result->subtype);
+    mdns_mem_free(result);
+}
+
+void mdns_srv_resolver_result_free(mdns_srv_resolver_result_t *result)
+{
+    if (!result) {
+        return;
+    }
+
+    mdns_mem_free((char *)result->instance);
+    mdns_mem_free((char *)result->service);
+    mdns_mem_free((char *)result->proto);
+    mdns_mem_free((char *)result->hostname);
     mdns_mem_free(result);
 }
