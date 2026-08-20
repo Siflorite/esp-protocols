@@ -20,7 +20,7 @@
 
 #ifdef CONFIG_MDNS_ENABLE_RESOLVER
 #define MDNS_CACHE_RECORD_RESOLVER_MASK \
-    ((mdns_cache_record_mask_t)(MDNS_CACHE_RECORD_PTR | MDNS_CACHE_RECORD_SUBTYPE))
+    ((mdns_cache_record_mask_t)(MDNS_CACHE_RECORD_PTR | MDNS_CACHE_RECORD_SUBTYPE | MDNS_CACHE_RECORD_SRV))
 #endif
 
 #if defined(CONFIG_MDNS_ENABLE_BROWSE) && defined(CONFIG_MDNS_ENABLE_RESOLVER)
@@ -504,6 +504,16 @@ static void notify_ptr_removed(const mdns_cache_entry_t *entry, const mdns_servi
 #endif
 }
 
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+static void notify_service_removed(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service,
+                                   mdns_cache_record_mask_t record_mask)
+{
+    if (!mdns_priv_resolver_notify_goodbye_from_service_cache(entry, service, record_mask, NULL)) {
+        ESP_LOGE(TAG, "Failed to notify resolver goodbye for record mask: %d", record_mask);
+    }
+}
+#endif
+
 mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol,
                                                       const char *instance, const char *service, const char *proto,
                                                       const char *subtype, uint32_t ttl)
@@ -629,6 +639,10 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
             return MDNS_CACHE_NO_CHANGE;
         }
 
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+        notify_service_removed(owner_entry, service_entry, MDNS_CACHE_RECORD_SRV);
+#endif
+
         service_entry->srv_present = false;
         service_entry->priority = 0;
         service_entry->weight = 0;
@@ -674,9 +688,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
         result = srv_result;
     }
 
-#ifdef CONFIG_MDNS_ENABLE_BROWSE
-    service_cache_mark_sync_out(service_entry, result, MDNS_CACHE_RECORD_SRV, MDNS_CACHE_CONSUMER_BROWSE);
-#endif
+    service_cache_mark_sync_out(service_entry, result, MDNS_CACHE_RECORD_SRV, MDNS_CACHE_CONSUMERS);
     return result;
 }
 
@@ -960,6 +972,9 @@ void mdns_priv_cache_remove_expired_records(int64_t now_us)
             }
 
             if (service->srv_present && now_us >= service->srv_expires_at_us) {
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+                notify_service_removed(entry, service, MDNS_CACHE_RECORD_SRV);
+#endif
                 service->srv_present = false;
                 service->priority = 0;
                 service->weight = 0;
