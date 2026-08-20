@@ -162,6 +162,47 @@ typedef void (*mdns_query_notify_t)(mdns_search_once_t *search);
  */
 typedef void (*mdns_browse_notify_t)(mdns_result_t *result);
 
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+/**
+ * @brief Continuous record resolver handle
+ */
+typedef struct mdns_resolver_s mdns_resolver_t;
+
+/**
+ * @brief SRV resolver result structure.
+ *
+ * TTL=0 refers to a goodbye message.
+ *
+ * @note This structure should be freed by `mdns_srv_resolver_result_free()`
+ */
+typedef struct mdns_srv_resolver_result_s {
+    esp_netif_t *esp_netif;                 /*!< ptr to corresponding esp-netif */
+    mdns_ip_protocol_t ip_protocol;         /*!< ip_protocol type of the interface (v4/v6) */
+
+    const char *instance_name;              /*!< instance name */
+    const char *service_type;               /*!< service type */
+    const char *proto;                      /*!< service protocol */
+
+    const char *hostname;                   /*!< hostname */
+    uint16_t priority;                      /*!< priority */
+    uint16_t weight;                        /*!< weight */
+    uint16_t port;                          /*!< service port */
+    uint32_t ttl;                           /*!< time to live */
+} mdns_srv_resolver_result_t;
+
+/**
+ * @brief SRV resolver result change notifier
+ *
+ * @note Ownership of @p result is transferred to the caller when the callback is invoked.
+ *       Users must free the result with `mdns_srv_resolver_result_free()` after handling it.
+ *
+ * @warning This callback is called in the mDNS service task.
+ *          Users must not call APIs that acquire mDNS service lock from this callback.
+ *          For example, resolvers new/delete APIs.
+ */
+typedef void (*mdns_srv_resolver_notify_t)(mdns_srv_resolver_result_t *result);
+#endif // CONFIG_MDNS_ENABLE_RESOLVER
+
 /**
  * @brief Hostname change notifier
  *
@@ -1143,6 +1184,48 @@ esp_err_t mdns_browse_delete(const char *service, const char *proto);
  */
 esp_err_t mdns_browse_delete_with_subtype(const char *service, const char *proto, const char *subtype);
 #endif /* CONFIG_MDNS_ENABLE_BROWSE */
+
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+/**
+ * @brief Start a continuous SRV resolver for a service `_instance._service._proto`.
+ *
+ * @param instance_name     Service instance name
+ * @param service           Service type, e.g. `_http`, `_ftp` etc.
+ * @param proto             Service protocol, e.g. `_tcp`, `_udp` etc.
+ * @param notifier          Callback invoked on SRV updates and goodbye messages.
+ *                          See @ref mdns_srv_resolver_notify_t for callback semantics and limitations.
+ * @return Pointer to the new SRV resolver if initiated successfully.
+ *         NULL otherwise.
+ *
+ * @note Available when CONFIG_MDNS_ENABLE_RESOLVER is enabled (default); can be disabled to reduce binary size.
+ */
+mdns_resolver_t *mdns_srv_resolver_new(const char *instance_name, const char *service, const char *proto,
+                                       mdns_srv_resolver_notify_t notifier);
+
+/**
+ * @brief Stop the continuous resolver.
+ *
+ * @param resolver Pointer to the resolver to stop.
+ * @return
+ *     - ESP_OK                 success.
+ *     - ESP_ERR_INVALID_ARG    the resolver is NULL.
+ *     - ESP_ERR_NOT_FOUND      the resolver was never started.
+ *     - ESP_ERR_INVALID_STATE  mDNS is not running.
+ *     - ESP_ERR_NO_MEM         no memory for allocation.
+ *
+ * @note Available when CONFIG_MDNS_ENABLE_RESOLVER is enabled (default); can be disabled to reduce binary size.
+ */
+esp_err_t mdns_resolver_delete(mdns_resolver_t *resolver);
+
+/**
+ * @brief Free the SRV resolver result.
+ *
+ * @param result Pointer to the SRV resolver result to free.
+ *
+ * @note Available when CONFIG_MDNS_ENABLE_RESOLVER is enabled (default); can be disabled to reduce binary size.
+ */
+void mdns_srv_resolver_result_free(mdns_srv_resolver_result_t *result);
+#endif // CONFIG_MDNS_ENABLE_RESOLVER
 
 #ifdef __cplusplus
 }
