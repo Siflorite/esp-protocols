@@ -23,7 +23,7 @@
 #include "mdns_querier.h"
 #include "mdns_pcb.h"
 #include "mdns_responder.h"
-#ifdef CONFIG_MDNS_ENABLE_BROWSE
+#if defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
 #include "mdns_cache.h"
 #endif
 #ifdef CONFIG_MDNS_ENABLE_RESOLVER
@@ -46,7 +46,7 @@
 #define MDNS_TASK_USE_SIMPLE_CREATE 0
 #endif
 
-#ifdef CONFIG_MDNS_ENABLE_BROWSE
+#if defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
 #define MDNS_CACHE_SCAN_INTERVAL_MS 1000
 #endif
 
@@ -242,7 +242,7 @@ static void service_task(void *pvParameters)
     mdns_action_t *a = NULL;
     TickType_t wait_ticks = portMAX_DELAY;
 
-#ifdef CONFIG_MDNS_ENABLE_BROWSE
+#if defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
     wait_ticks = pdMS_TO_TICKS(MDNS_CACHE_SCAN_INTERVAL_MS);
 #endif
 
@@ -258,7 +258,7 @@ static void service_task(void *pvParameters)
 
             MDNS_SERVICE_LOCK();
 
-#ifdef CONFIG_MDNS_ENABLE_BROWSE
+#if defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
             // Clean up stale records, especially before consumer registrations.
             // For RX events, expiration is handled after updating cache in mdns_receive
             // to avoid unnecessary insertion after removal.
@@ -484,10 +484,12 @@ void mdns_free(void)
     mdns_priv_query_free();
 #ifdef CONFIG_MDNS_ENABLE_BROWSE
     mdns_priv_browse_free();
-    mdns_priv_cache_clear();
 #endif
 #ifdef CONFIG_MDNS_ENABLE_RESOLVER
     mdns_priv_resolver_free();
+#endif
+#if defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
+    mdns_priv_cache_clear();
 #endif
     mdns_priv_responder_free();
 }
