@@ -170,6 +170,21 @@ mdns_cache_update_result_t mdns_priv_cache_update_existing_addr(const esp_netif_
 void mdns_priv_cache_clear(void);
 
 /**
+ * @brief Deep copy a TXT linked list to arrays as required by `mdns_result_t` and `mdns_txt_resolver_result_t`.
+ *
+ * @param txt_list Pointer to the input TXT linked list.
+ * @param out_txt Pointer to the output TXT array.
+ * @param out_value_len Pointer to the output TXT value length array.
+ * @param out_count Pointer to the output TXT count.
+ * @return true on success, false on failure.
+ *
+ * @note If return value is true, the output arrays will be allocated and the caller is responsible for freeing them.
+ *       Otherwise, `*out_txt, *out_value_len` will be set to NULL and `*out_count` will be set to 0.
+ */
+bool mdns_priv_cache_copy_txt(const mdns_txt_linked_item_t *txt_list, mdns_txt_item_t **out_txt, uint8_t **out_value_len,
+                              size_t *out_count);
+
+/**
  * @brief Convert a service cache to a mdns_result_t.
  *
  * @param entry       Pointer to the cache entry.
