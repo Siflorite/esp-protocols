@@ -209,6 +209,26 @@ typedef struct mdns_srv_resolver_result_s {
     uint32_t ttl;                           /*!< time to live */
 } mdns_srv_resolver_result_t;
 
+/**
+ * @brief TXT resolver result structure.
+ *
+ * TTL=0 refers to a goodbye message.
+ *
+ * @note This structure should be freed by `mdns_txt_resolver_result_free()`
+ */
+typedef struct mdns_txt_resolver_result_s {
+    esp_netif_t *esp_netif;                 /*!< ptr to corresponding esp-netif */
+    mdns_ip_protocol_t ip_protocol;         /*!< ip_protocol type of the interface (v4/v6) */
+
+    const char *instance;                   /*!< instance name */
+    const char *service;                    /*!< service type */
+    const char *proto;                      /*!< service protocol */
+
+    mdns_txt_item_t *txt;                   /*!< array of txt items */
+    uint8_t *txt_item_value_len;            /*!< array of txt item value lengths */
+    size_t txt_item_count;                  /*!< number of txt items */
+    uint32_t ttl;                           /*!< time to live */
+} mdns_txt_resolver_result_t;
 
 /**
  * @brief PTR resolver result change notifier
@@ -233,6 +253,18 @@ typedef void (*mdns_ptr_resolver_notify_t)(mdns_ptr_resolver_result_t *result);
  *          For example, resolvers new/delete APIs.
  */
 typedef void (*mdns_srv_resolver_notify_t)(mdns_srv_resolver_result_t *result);
+
+/**
+ * @brief TXT resolver result change notifier
+ *
+ * @note Ownership of @p result is transferred to the caller when the callback is invoked.
+ *       Users must free the result with `mdns_txt_resolver_result_free()` after handling it.
+ *
+ * @warning This callback is called in the mDNS service task.
+ *          Users must not call APIs that acquire mDNS service lock from this callback.
+ *          For example, resolvers new/delete APIs.
+ */
+typedef void (*mdns_txt_resolver_notify_t)(mdns_txt_resolver_result_t *result);
 #endif // CONFIG_MDNS_ENABLE_RESOLVER
 
 /**
@@ -1250,6 +1282,22 @@ mdns_resolver_t *mdns_srv_resolver_new(const char *instance, const char *service
                                        mdns_srv_resolver_notify_t notifier);
 
 /**
+ * @brief Start a continuous TXT resolver for a service `_instance._service._proto`.
+ *
+ * @param instance          Service instance name
+ * @param service           Service type, e.g. `_http`, `_ftp` etc.
+ * @param proto             Service protocol, e.g. `_tcp`, `_udp` etc.
+ * @param notifier          Callback invoked on TXT updates and goodbye messages.
+ *                          See @ref mdns_txt_resolver_notify_t for callback semantics and limitations.
+ * @return Pointer to the new TXT resolver if initiated successfully.
+ *         NULL otherwise.
+ *
+ * @note Available when CONFIG_MDNS_ENABLE_RESOLVER is enabled (default); can be disabled to reduce binary size.
+ */
+mdns_resolver_t *mdns_txt_resolver_new(const char *instance, const char *service, const char *proto,
+                                       mdns_txt_resolver_notify_t notifier);
+
+/**
  * @brief Stop the continuous resolver.
  *
  * @param resolver Pointer to the resolver to stop.
@@ -1281,6 +1329,15 @@ void mdns_ptr_resolver_result_free(mdns_ptr_resolver_result_t *result);
  * @note Available when CONFIG_MDNS_ENABLE_RESOLVER is enabled (default); can be disabled to reduce binary size.
  */
 void mdns_srv_resolver_result_free(mdns_srv_resolver_result_t *result);
+
+/**
+ * @brief Free the TXT resolver result.
+ *
+ * @param result Pointer to the TXT resolver result to free.
+ *
+ * @note Available when CONFIG_MDNS_ENABLE_RESOLVER is enabled (default); can be disabled to reduce binary size.
+ */
+void mdns_txt_resolver_result_free(mdns_txt_resolver_result_t *result);
 #endif // CONFIG_MDNS_ENABLE_RESOLVER
 
 #ifdef __cplusplus
