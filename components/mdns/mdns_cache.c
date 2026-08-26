@@ -630,8 +630,9 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
         // Base PTR goodbye will remove the whole service cache entry.
         // So we need to notify all resolvers of the service goodbye.
         if (base_ptr_updated) {
-            if (!mdns_priv_resolver_notify_goodbye_from_service_cache(owner_entry, service_entry, MDNS_CACHE_RECORD_SRV)) {
-                ESP_LOGE(TAG, "Failed to notify SRV resolver goodbye");
+            if (!mdns_priv_resolver_notify_goodbye_from_service_cache(owner_entry, service_entry,
+                                                                      MDNS_CACHE_RECORD_SRV | MDNS_CACHE_RECORD_TXT)) {
+                ESP_LOGE(TAG, "Failed to notify resolvers goodbye");
             }
         }
 #endif // CONFIG_MDNS_ENABLE_RESOLVER
@@ -890,6 +891,13 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
             return MDNS_CACHE_NO_CHANGE;
         }
 
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+        // Notify the TXT resolver of goodbye before removing the TXT record from cache.
+        if (!mdns_priv_resolver_notify_goodbye_from_service_cache(owner_entry, service_entry, MDNS_CACHE_RECORD_TXT)) {
+            ESP_LOGE(TAG, "Failed to notify TXT resolver goodbye");
+        }
+#endif // CONFIG_MDNS_ENABLE_RESOLVER
+
         mdns_utils_free_txt_linked_list(service_entry->txt_list);
         service_entry->txt_list = NULL;
         service_entry->txt_present = false;
@@ -899,9 +907,10 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
             return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
         }
 
+#ifdef CONFIG_MDNS_ENABLE_BROWSE
         service_cache_mark_sync_out(service_entry, MDNS_CACHE_UPDATED,
-                                    MDNS_CACHE_RECORD_TXT | MDNS_CACHE_RECORD_BROWSE_SHARED, MDNS_CACHE_CONSUMER_BROWSE);
-
+                                    MDNS_CACHE_RECORD_BROWSE_SHARED, MDNS_CACHE_CONSUMER_BROWSE);
+#endif
         return MDNS_CACHE_UPDATED;
     }
 
@@ -929,7 +938,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
     }
 
     service_cache_mark_sync_out(service_entry, result, MDNS_CACHE_RECORD_TXT | MDNS_CACHE_RECORD_BROWSE_SHARED,
-                                MDNS_CACHE_CONSUMER_BROWSE);
+                                MDNS_CACHE_CONSUMERS);
     return result;
 }
 

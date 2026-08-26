@@ -353,7 +353,7 @@ handle_error :
     mdns_mem_free(txt);
 }
 
-#ifdef CONFIG_MDNS_ENABLE_BROWSE
+#if defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
 static bool result_txt_linked_list_create(const uint8_t *data, size_t len, mdns_txt_linked_item_t **out_txt)
 {
     *out_txt = NULL;
@@ -412,7 +412,7 @@ error:
     mdns_utils_free_txt_linked_list(txt_linked_list);
     return false;
 }
-#endif /* CONFIG_MDNS_ENABLE_BROWSE */
+#endif // defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
 
 #ifdef CONFIG_LWIP_IPV4
 /**
@@ -1199,20 +1199,38 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
                 size_t txt_count = 0;
 
                 mdns_result_t *result = NULL;
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+                mdns_resolver_t *resolver_result = mdns_priv_resolver_find(name->host, name->service, name->proto, MDNS_RESOLVER_TYPE_TXT);
+#endif
+#if defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
+                const char *cache_instance = NULL;
+                const char *cache_service = NULL;
+                const char *cache_proto = NULL;
 #ifdef CONFIG_MDNS_ENABLE_BROWSE
-                mdns_txt_linked_item_t *txt_linked_list = NULL;
-                if (browse_result && !mdns_utils_str_null_or_empty(browse_result_instance)
-                        && !mdns_utils_str_null_or_empty(browse_result_service)
-                        && !mdns_utils_str_null_or_empty(browse_result_proto)) {
-
-                    if (result_txt_linked_list_create(data_ptr, data_len, &txt_linked_list)) {
-                        (void)mdns_priv_cache_update_txt(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol,
-                                                         browse_result_instance, browse_result_service, browse_result_proto, txt_linked_list, ttl);
-                        txt_linked_list = NULL;
-                    }
-
+                if (browse_result) {
+                    cache_instance = browse_result_instance;
+                    cache_service = browse_result_service;
+                    cache_proto = browse_result_proto;
                 }
 #endif
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+                if (!cache_instance && resolver_result) {
+                    cache_instance = resolver_result->instance_name;
+                    cache_service = resolver_result->service;
+                    cache_proto = resolver_result->proto;
+                }
+#endif
+                if (!mdns_utils_str_null_or_empty(cache_instance)
+                        && !mdns_utils_str_null_or_empty(cache_service)
+                        && !mdns_utils_str_null_or_empty(cache_proto)) {
+                    mdns_txt_linked_item_t *txt_linked_list = NULL;
+                    if (result_txt_linked_list_create(data_ptr, data_len, &txt_linked_list)) {
+                        (void)mdns_priv_cache_update_txt(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol,
+                                                         cache_instance, cache_service, cache_proto, txt_linked_list, ttl);
+                        txt_linked_list = NULL;
+                    }
+                }
+#endif // defined(CONFIG_MDNS_ENABLE_BROWSE) || defined(CONFIG_MDNS_ENABLE_RESOLVER)
                 if (search_result) {
                     if (search_result->type == MDNS_TYPE_PTR) {
                         result = search_result->result;
