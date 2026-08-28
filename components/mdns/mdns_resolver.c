@@ -55,6 +55,10 @@ static mdns_cache_record_type_t resolver_type_to_record_type(mdns_resolver_t *re
         return MDNS_CACHE_RECORD_SRV;
     case MDNS_RESOLVER_TYPE_TXT:
         return MDNS_CACHE_RECORD_TXT;
+    case MDNS_RESOLVER_TYPE_A:
+        return MDNS_CACHE_RECORD_A;
+    case MDNS_RESOLVER_TYPE_AAAA:
+        return MDNS_CACHE_RECORD_AAAA;
     default:
         return 0;
     }
@@ -94,30 +98,65 @@ static bool resolver_exists(const mdns_resolver_t *resolver)
     return false;
 }
 
-static bool resolver_matches_service_cache(const mdns_resolver_t *resolver, const mdns_cache_entry_t *entry, const mdns_service_cache_t *service)
+static bool cache_addr_matches_resolver_type(const mdns_cache_addr_t *addr, mdns_resolver_type_t type)
 {
-    if (resolver && entry && service && resolver->state == RESOLVER_RUNNING) {
+    if (!addr || (type != MDNS_RESOLVER_TYPE_A && type != MDNS_RESOLVER_TYPE_AAAA)) {
+        return false;
+    }
+
+#ifdef CONFIG_LWIP_IPV4
+    if (type == MDNS_RESOLVER_TYPE_A && addr->addr.type == ESP_IPADDR_TYPE_V4) {
+        return true;
+    }
+#endif
+#ifdef CONFIG_LWIP_IPV6
+    if (type == MDNS_RESOLVER_TYPE_AAAA && addr->addr.type == ESP_IPADDR_TYPE_V6) {
+        return true;
+    }
+#endif
+    return false;
+}
+
+static bool entry_has_addr_type(const mdns_cache_entry_t *entry, mdns_resolver_type_t type)
+{
+    if (!entry || (type != MDNS_RESOLVER_TYPE_A && type != MDNS_RESOLVER_TYPE_AAAA)) {
+        return false;
+    }
+
+    for (const mdns_cache_addr_t *addr = entry->addr_list; addr; addr = addr->next) {
+        if (cache_addr_matches_resolver_type(addr, type)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool resolver_matches_service_cache(const mdns_resolver_t *resolver, const mdns_cache_entry_t *entry, const mdns_service_cache_t *service,
+                                           bool allow_empty_addr_list)
+{
+    if (resolver && entry && resolver->state == RESOLVER_RUNNING) {
         switch (resolver->type) {
         case MDNS_RESOLVER_TYPE_PTR:
-            return resolver->notifier.ptr
+            return service && resolver->notifier.ptr
                    && names_equal(resolver->service, service->service)
                    && names_equal(resolver->proto, service->proto)
                    && (mdns_utils_str_null_or_empty(resolver->subtype) ? service->ptr_present
                        : get_subtype_from_service_cache(service, resolver->subtype) != NULL);
         case MDNS_RESOLVER_TYPE_SRV:
-            return service->srv_present && resolver->notifier.srv
+            return service && service->srv_present && resolver->notifier.srv
                    && names_equal(resolver->instance, service->instance_name)
                    && names_equal(resolver->service, service->service)
                    && names_equal(resolver->proto, service->proto);
         case MDNS_RESOLVER_TYPE_TXT:
-            return service->txt_present && resolver->notifier.txt
+            return service && service->txt_present && resolver->notifier.txt
                    && names_equal(resolver->instance, service->instance_name)
                    && names_equal(resolver->service, service->service)
                    && names_equal(resolver->proto, service->proto);
         case MDNS_RESOLVER_TYPE_A:
         case MDNS_RESOLVER_TYPE_AAAA:
-            // Address resolvers consume hostname-level cache entries.
-            return false;
+            return resolver->notifier.addr
+                   && names_equal(resolver->hostname, entry->hostname)
+                   && (allow_empty_addr_list || entry_has_addr_type(entry, resolver->type));
         default:
             ESP_LOGE(TAG, "Invalid resolver type: %d", resolver->type);
             return false;
@@ -455,10 +494,66 @@ static mdns_txt_resolver_result_t *build_txt_result(const mdns_cache_entry_t *en
     return result;
 }
 
+static mdns_addr_resolver_result_t *build_addr_result(const mdns_cache_entry_t *entry, const mdns_resolver_type_t type)
+{
+    if (!entry || (type != MDNS_RESOLVER_TYPE_A && type != MDNS_RESOLVER_TYPE_AAAA)) {
+        return NULL;
+    }
+
+    mdns_addr_resolver_result_t *result = mdns_mem_calloc(1, sizeof(mdns_addr_resolver_result_t));
+    if (!result) {
+        HOOK_MALLOC_FAILED;
+        return NULL;
+    }
+
+    result->esp_netif = entry->esp_netif;
+    result->ip_protocol = entry->ip_protocol;
+
+    result->hostname = mdns_mem_strdup(entry->hostname);
+    if (!result->hostname) {
+        HOOK_MALLOC_FAILED;
+        mdns_addr_resolver_result_free(result);
+        return NULL;
+    }
+
+    switch (type) {
+    case MDNS_RESOLVER_TYPE_A:
+        result->type = MDNS_ADDR_RESOLVER_TYPE_A;
+        break;
+    case MDNS_RESOLVER_TYPE_AAAA:
+        result->type = MDNS_ADDR_RESOLVER_TYPE_AAAA;
+        break;
+    default:
+        mdns_addr_resolver_result_free(result);
+        return NULL;
+    }
+
+    // On goodbye, the TTL=0 address is already removed from address list.
+    for (const mdns_cache_addr_t *cached_addr = entry->addr_list; cached_addr; cached_addr = cached_addr->next) {
+        if (!cache_addr_matches_resolver_type(cached_addr, type)) {
+            continue;
+        }
+
+        mdns_addr_resolver_address_t *addr = mdns_mem_calloc(1, sizeof(mdns_addr_resolver_address_t));
+        if (!addr) {
+            HOOK_MALLOC_FAILED;
+            mdns_addr_resolver_result_free(result);
+            return NULL;
+        }
+
+        addr->addr = cached_addr->addr;
+        addr->ttl = cached_addr->ttl;
+        addr->next = result->addresses;
+        result->addresses = addr;
+    }
+
+    return result;
+}
+
 static bool resolver_notify(mdns_resolver_t *resolver, const mdns_cache_entry_t *entry, const mdns_service_cache_t *service,
                             bool goodbye)
 {
-    if (!resolver || !entry || !service) {
+    if (!resolver || !entry) {
         return false;
     }
 
@@ -476,7 +571,7 @@ static bool resolver_notify(mdns_resolver_t *resolver, const mdns_cache_entry_t 
         resolver->notifier.ptr(ptr_result);
         return true;
     case MDNS_RESOLVER_TYPE_SRV:
-        if (!resolver->notifier.srv) {
+        if (!service || !resolver->notifier.srv) {
             return false;
         }
 
@@ -488,7 +583,7 @@ static bool resolver_notify(mdns_resolver_t *resolver, const mdns_cache_entry_t 
         resolver->notifier.srv(srv_result);
         return true;
     case MDNS_RESOLVER_TYPE_TXT:
-        if (!resolver->notifier.txt) {
+        if (!service || !resolver->notifier.txt) {
             return false;
         }
 
@@ -498,6 +593,19 @@ static bool resolver_notify(mdns_resolver_t *resolver, const mdns_cache_entry_t 
         }
 
         resolver->notifier.txt(txt_result);
+        return true;
+    case MDNS_RESOLVER_TYPE_A:
+    case MDNS_RESOLVER_TYPE_AAAA:
+        if (!resolver->notifier.addr) {
+            return false;
+        }
+
+        mdns_addr_resolver_result_t *addr_result = build_addr_result(entry, resolver->type);
+        if (!addr_result) {
+            return false;
+        }
+
+        resolver->notifier.addr(addr_result);
         return true;
     default:
         ESP_LOGE(TAG, "Invalid resolver type: %d", resolver->type);
@@ -561,6 +669,12 @@ mdns_resolver_t *mdns_priv_resolver_find(const char *instance, const char *servi
                 return it;
             }
             break;
+        case MDNS_RESOLVER_TYPE_A:
+        case MDNS_RESOLVER_TYPE_AAAA:
+            if (names_equal(it->hostname, instance)) {
+                return it;
+            }
+            break;
         default:
             ESP_LOGE(TAG, "Invalid resolver type: %d", it->type);
             break;
@@ -586,7 +700,7 @@ bool mdns_priv_resolver_has_hostname(const char *hostname, mdns_resolver_type_t 
     }
 
     for (mdns_resolver_t *it = s_resolver; it; it = it->next) {
-        if (it->state == RESOLVER_RUNNING && it->type == type && names_equal(it->hostname, hostname)) {
+        if (it->state != RESOLVER_OFF && it->type == type && names_equal(it->hostname, hostname)) {
             return true;
         }
     }
@@ -623,13 +737,13 @@ mdns_resolver_t *mdns_priv_resolver_find_ptr(mdns_name_t *name, uint16_t type, m
     return NULL;
 }
 
-mdns_cache_record_mask_t mdns_priv_resolver_update_from_service_cache(const mdns_cache_entry_t *entry,
-                                                                      const mdns_service_cache_t *service,
-                                                                      mdns_cache_record_mask_t record_mask)
+mdns_cache_record_mask_t mdns_priv_resolver_update_from_cache(const mdns_cache_entry_t *entry,
+                                                              const mdns_service_cache_t *service,
+                                                              mdns_cache_record_mask_t record_mask)
 {
     mdns_cache_record_mask_t completed_records = record_mask;
 
-    if (!entry || !service) {
+    if (!entry || record_mask == 0) {
         return 0;
     }
 
@@ -640,7 +754,7 @@ mdns_cache_record_mask_t mdns_priv_resolver_update_from_service_cache(const mdns
             continue;
         }
         // Checks if the resolver matches the service cache.
-        if (!resolver_matches_service_cache(resolver, entry, service)) {
+        if (!resolver_matches_service_cache(resolver, entry, service, false)) {
             continue;
         }
         if (resolver->type == MDNS_RESOLVER_TYPE_PTR
@@ -658,26 +772,26 @@ mdns_cache_record_mask_t mdns_priv_resolver_update_from_service_cache(const mdns
     return completed_records;
 }
 
-bool mdns_priv_resolver_notify_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service,
-                                                  mdns_resolver_t *resolver)
+bool mdns_priv_resolver_notify_from_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service,
+                                          mdns_resolver_t *resolver)
 {
-    if (!entry || !service || !resolver || resolver->state != RESOLVER_RUNNING) {
+    if (!entry || !resolver || resolver->state != RESOLVER_RUNNING) {
         return false;
     }
 
-    if (!resolver_matches_service_cache(resolver, entry, service)) {
+    if (!resolver_matches_service_cache(resolver, entry, service, false)) {
         return true;
     }
 
     return resolver_notify(resolver, entry, service, false);
 }
 
-bool mdns_priv_resolver_notify_goodbye_from_service_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service,
-                                                          mdns_cache_record_mask_t record_mask, const char *subtype)
+bool mdns_priv_resolver_notify_goodbye_from_cache(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service,
+                                                  mdns_cache_record_mask_t record_mask, const char *subtype)
 {
     bool notified = true;
 
-    if (!entry || !service) {
+    if (!entry || record_mask == 0) {
         return false;
     }
 
@@ -688,7 +802,7 @@ bool mdns_priv_resolver_notify_goodbye_from_service_cache(const mdns_cache_entry
             continue;
         }
         // Checks if the resolver matches the service cache.
-        if (!resolver_matches_service_cache(resolver, entry, service)) {
+        if (!resolver_matches_service_cache(resolver, entry, service, true)) {
             continue;
         }
         if (resolver->type == MDNS_RESOLVER_TYPE_PTR
