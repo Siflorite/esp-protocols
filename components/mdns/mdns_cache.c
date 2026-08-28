@@ -1250,3 +1250,67 @@ void mdns_priv_cache_remove_service_cache_if_unused(const char *instance, const 
     }
     remove_unused_service_caches(instance, service, proto);
 }
+
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+static bool cache_addr_matches_resolver_type(const mdns_cache_addr_t *addr, mdns_resolver_type_t type)
+{
+    if (!addr) {
+        return false;
+    }
+#ifdef CONFIG_LWIP_IPV4
+    if (type == MDNS_RESOLVER_TYPE_A) {
+        return addr->addr.type == ESP_IPADDR_TYPE_V4;
+    }
+#endif
+#ifdef CONFIG_LWIP_IPV6
+    if (type == MDNS_RESOLVER_TYPE_AAAA) {
+        return addr->addr.type == ESP_IPADDR_TYPE_V6;
+    }
+#endif
+    return false;
+}
+
+void mdns_priv_cache_remove_address_list_if_unused(const char *hostname, mdns_resolver_type_t type)
+{
+    mdns_cache_entry_t **entry_ptr = &s_cache;
+    if (mdns_utils_str_null_or_empty(hostname) || (type != MDNS_RESOLVER_TYPE_A && type != MDNS_RESOLVER_TYPE_AAAA)) {
+        return;
+    }
+
+    while (*entry_ptr) {
+        mdns_cache_entry_t *entry = *entry_ptr;
+        mdns_service_cache_t *cache = entry->service_cache_list;
+
+        if (names_equal(entry->hostname, hostname)) {
+            bool in_use = mdns_priv_resolver_has_hostname(hostname, type);
+#ifdef CONFIG_MDNS_ENABLE_BROWSE
+            while (cache && !in_use) {
+                in_use |= mdns_priv_browse_has_service(cache->service, cache->proto);
+                cache = cache->next;
+            }
+#endif
+            if (!in_use) {
+                // Clean up unused IPv4/IPv6 addresses in address list.
+                mdns_cache_addr_t **addr_ptr = &entry->addr_list;
+                while (*addr_ptr) {
+                    mdns_cache_addr_t *addr = *addr_ptr;
+                    if (cache_addr_matches_resolver_type(addr, type)) {
+                        *addr_ptr = addr->next;
+                        mdns_mem_free(addr);
+                    } else {
+                        addr_ptr = &(*addr_ptr)->next;
+                    }
+                }
+            }
+
+            if (!entry->addr_list && !entry->service_cache_list) {
+                *entry_ptr = entry->next;
+                cache_entry_free(entry);
+                continue;
+            }
+        }
+
+        entry_ptr = &(*entry_ptr)->next;
+    }
+}
+#endif // CONFIG_MDNS_ENABLE_RESOLVER

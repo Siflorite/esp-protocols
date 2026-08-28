@@ -234,6 +234,56 @@ typedef struct mdns_txt_resolver_result_s {
  *          For example, resolvers new/delete APIs.
  */
 typedef void (*mdns_txt_resolver_notify_t)(mdns_txt_resolver_result_t *result);
+
+/**
+ * @brief Address record type
+ *
+ * @note  This enum is used to specify the address record type in `mdns_addr_resolver_result_t`,
+ *        even when `addresses` is empty (e.g., when TTL=0).
+ */
+typedef enum {
+    MDNS_ADDR_RESOLVER_TYPE_A,
+    MDNS_ADDR_RESOLVER_TYPE_AAAA,
+} mdns_addr_resolver_type_t;
+
+/**
+ * @brief Address record structure.
+ *        Stores IP address and TTL.
+ */
+typedef struct mdns_addr_resolver_address_s {
+    esp_ip_addr_t addr;
+    uint32_t ttl;
+    struct mdns_addr_resolver_address_s *next;
+} mdns_addr_resolver_address_t;
+
+/**
+ * @brief Address resolver result structure.
+ *        Stores the hostname, address record type, and linked list of IP addresses found.
+ *
+ *        Every address record carries an independent TTL.
+ *
+ * @note  This structure should be freed by `mdns_addr_resolver_result_free()`
+ */
+typedef struct mdns_addr_resolver_result_s {
+    esp_netif_t *esp_netif;                     /*!< ptr to corresponding esp-netif */
+    mdns_ip_protocol_t ip_protocol;             /*!< ip_protocol type of the interface (v4/v6) */
+
+    const char *hostname;                       /*!< hostname */
+    mdns_addr_resolver_type_t type;             /*!< address record type, A or AAAA */
+    mdns_addr_resolver_address_t *addresses;    /*!< linked list of IP addresses found */
+} mdns_addr_resolver_result_t;
+
+/**
+ * @brief Address resolver result change notifier
+ *
+ * @note Ownership of @p result is transferred to the caller when the callback is invoked.
+ *       Users must free the result with `mdns_addr_resolver_result_free()` after handling it.
+ *
+ * @warning This callback is called in the mDNS service task.
+ *          Users must not call APIs that acquire mDNS service lock from this callback.
+ *          For example, resolvers new/delete APIs.
+ */
+typedef void (*mdns_addr_resolver_notify_t)(mdns_addr_resolver_result_t *result);
 #endif // CONFIG_MDNS_ENABLE_RESOLVER
 
 /**
@@ -1252,6 +1302,21 @@ mdns_resolver_t *mdns_txt_resolver_new(const char *instance_name, const char *se
                                        mdns_txt_resolver_notify_t notifier);
 
 /**
+ * @brief Start a continuous address resolver for a hostname.
+ *
+ * @param hostname  Hostname to resolve.
+ * @param type      Address record type, A or AAAA.
+ * @param notifier  Callback invoked on address updates and goodbye messages.
+ *                  See @ref mdns_addr_resolver_notify_t for callback semantics and limitations.
+ * @return Pointer to the new address resolver if initiated successfully.
+ *         NULL otherwise.
+ *
+ * @note Available when CONFIG_MDNS_ENABLE_RESOLVER is enabled (default); can be disabled to reduce binary size.
+ */
+mdns_resolver_t *mdns_addr_resolver_new(const char *hostname, mdns_addr_resolver_type_t type,
+                                        mdns_addr_resolver_notify_t notifier);
+
+/**
  * @brief Stop the continuous resolver.
  *
  * @param resolver Pointer to the resolver to stop.
@@ -1283,6 +1348,15 @@ void mdns_srv_resolver_result_free(mdns_srv_resolver_result_t *result);
  * @note Available when CONFIG_MDNS_ENABLE_RESOLVER is enabled (default); can be disabled to reduce binary size.
  */
 void mdns_txt_resolver_result_free(mdns_txt_resolver_result_t *result);
+
+/**
+ * @brief Free the address resolver result.
+ *
+ * @param result Pointer to the address resolver result to free.
+ *
+ * @note Available when CONFIG_MDNS_ENABLE_RESOLVER is enabled (default); can be disabled to reduce binary size.
+ */
+void mdns_addr_resolver_result_free(mdns_addr_resolver_result_t *result);
 #endif // CONFIG_MDNS_ENABLE_RESOLVER
 
 #ifdef __cplusplus

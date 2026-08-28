@@ -220,6 +220,14 @@ bool mdns_priv_cache_notify_browse(mdns_browse_t *browse);
  * @return true if successfully notified, false otherwise.
  */
 bool mdns_priv_cache_notify_resolver(mdns_resolver_t *resolver);
+
+/**
+ * @brief Remove address list of a hostname if no consumers subscribe to it.
+ *
+ * @param hostname Hostname.
+ * @param type Type of the resolver.
+ */
+void mdns_priv_cache_remove_address_list_if_unused(const char *hostname, mdns_resolver_type_t type);
 #endif
 
 /**

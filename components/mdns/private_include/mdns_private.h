@@ -508,6 +508,8 @@ typedef enum {
 typedef enum {
     MDNS_RESOLVER_TYPE_SRV,
     MDNS_RESOLVER_TYPE_TXT,
+    MDNS_RESOLVER_TYPE_A,
+    MDNS_RESOLVER_TYPE_AAAA,
 } mdns_resolver_type_t;
 
 /**
@@ -530,10 +532,12 @@ typedef struct mdns_resolver_s {
     char *instance_name;                    /*!< Instance name */
     char *service;                          /*!< Service name */
     char *proto;                            /*!< Protocol name */
+    char *hostname;                         /*!< Hostname */
 
     union {
         mdns_srv_resolver_notify_t srv;     /*!< SRV result notifier */
         mdns_txt_resolver_notify_t txt;     /*!< TXT result notifier */
+        mdns_addr_resolver_notify_t addr;   /*!< Address result notifier */
     } notifier;
 
     struct mdns_resolver_s *next;           /*!< Next resolver in the linked list */

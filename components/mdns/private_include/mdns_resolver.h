@@ -49,6 +49,15 @@ void mdns_priv_resolver_send_by_ip_protocol(mdns_if_t mdns_if, mdns_ip_protocol_
 bool mdns_priv_resolver_has_service(const char *instance_name, const char *service, const char *proto);
 
 /**
+ * @brief Check if a running address resolver `hostname` exists.
+ *
+ * @param hostname Hostname.
+ * @param type Type of the resolver.
+ * @return true if a running address resolver `hostname` exists, false otherwise.
+ */
+bool mdns_priv_resolver_has_hostname(const char *hostname, mdns_resolver_type_t type);
+
+/**
  * @brief Find a running resolver by instance name, service, and protocol.
  *
  * @param instance_name Instance name.
