@@ -18,9 +18,9 @@
 #endif
 #include "mdns_utils.h"
 
+#define MDNS_CACHE_ADDR_RECORD_MASK ((mdns_cache_record_mask_t)(MDNS_CACHE_RECORD_A | MDNS_CACHE_RECORD_AAAA))
 #ifdef CONFIG_MDNS_ENABLE_RESOLVER
-#define MDNS_CACHE_RECORD_RESOLVER_MASK ((mdns_cache_record_mask_t)(MDNS_CACHE_RECORD_SRV | MDNS_CACHE_RECORD_TXT \
-                                                                    | MDNS_CACHE_RECORD_ADDR))
+#define MDNS_CACHE_RECORD_RESOLVER_MASK ((mdns_cache_record_mask_t)(MDNS_CACHE_RECORD_SRV | MDNS_CACHE_RECORD_TXT))
 #endif
 
 #if defined(CONFIG_MDNS_ENABLE_BROWSE) && defined(CONFIG_MDNS_ENABLE_RESOLVER)
@@ -34,6 +34,8 @@
 static const char *TAG = "mdns_cache";
 
 static mdns_cache_entry_t *s_cache;
+
+static void remove_unused_addr_records(mdns_cache_entry_t *entry);
 
 static inline bool names_equal(const char *a, const char *b)
 {
@@ -58,26 +60,6 @@ static bool service_match(const mdns_service_cache_t *cache, const char *instanc
 {
     return names_equal(cache->instance_name, instance) && names_equal(cache->service, service)
            && names_equal(cache->proto, proto);
-}
-
-static bool addr_equal(const esp_ip_addr_t *a, const esp_ip_addr_t *b)
-{
-    if (a->type != b->type) {
-        return false;
-    }
-
-#ifdef CONFIG_LWIP_IPV6
-    if (a->type == ESP_IPADDR_TYPE_V6) {
-        return !memcmp(a->u_addr.ip6.addr, b->u_addr.ip6.addr, sizeof(a->u_addr.ip6.addr));
-    }
-#endif
-#ifdef CONFIG_LWIP_IPV4
-    if (a->type == ESP_IPADDR_TYPE_V4) {
-        return a->u_addr.ip4.addr == b->u_addr.ip4.addr;
-    }
-#endif
-
-    return false;
 }
 
 /**
@@ -392,7 +374,8 @@ static bool cache_move_service(mdns_cache_entry_t *old_entry, mdns_cache_entry_t
             new_entry->service_cache_list = cache;
 
             if (!old_entry->service_cache_list) {
-                cache_remove_entry(old_entry);
+                remove_unused_addr_records(old_entry);
+                cache_remove_entry_if_empty(old_entry);
             }
             return true;
         }
@@ -502,7 +485,8 @@ static bool cache_remove_service(mdns_cache_entry_t *entry, mdns_service_cache_t
             *service_entry_ptr = service_entry->next;
             service_entry_free(service_entry);
             if (!entry->service_cache_list) {
-                cache_remove_entry(entry);
+                remove_unused_addr_records(entry);
+                cache_remove_entry_if_empty(entry);
             }
             return true;
         }
@@ -550,11 +534,66 @@ static void remove_unused_service_caches(const char *instance, const char *servi
         }
 
         if (!entry->service_cache_list) {
-            *entry_ptr = entry->next;
-            cache_entry_free(entry);
-            continue;
+            remove_unused_addr_records(entry);
+            if (!entry->addr_list) {
+                *entry_ptr = entry->next;
+                cache_entry_free(entry);
+                continue;
+            }
         }
         entry_ptr = &(*entry_ptr)->next;
+    }
+}
+
+/**
+ * @brief Remove address records of an entry that are no longer used by resolvers.
+ *
+ * @param entry         The entry to remove address records from.
+ */
+static void remove_unused_addr_records(mdns_cache_entry_t *entry)
+{
+    if (!entry) {
+        return;
+    }
+
+    mdns_cache_addr_t **addr_ptr = &entry->addr_list;
+    while (*addr_ptr) {
+        bool in_use = false;
+        mdns_cache_addr_t *addr = *addr_ptr;
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+        mdns_cache_record_mask_t record = 0;
+#ifdef CONFIG_LWIP_IPV4
+        if (addr->addr.type == ESP_IPADDR_TYPE_V4) {
+            record = MDNS_CACHE_RECORD_A;
+            in_use = !mdns_utils_str_null_or_empty(entry->hostname)
+                     && mdns_priv_resolver_has_hostname(entry->hostname,
+                                                        MDNS_RESOLVER_TYPE_A);
+        }
+#endif
+
+#ifdef CONFIG_LWIP_IPV6
+        if (addr->addr.type == ESP_IPADDR_TYPE_V6) {
+            record = MDNS_CACHE_RECORD_AAAA;
+            in_use = !mdns_utils_str_null_or_empty(entry->hostname)
+                     && mdns_priv_resolver_has_hostname(entry->hostname,
+                                                        MDNS_RESOLVER_TYPE_AAAA);
+        }
+#endif
+#endif //CONFIG_MDNS_ENABLE_RESOLVER
+
+        if (in_use) {
+            addr_ptr = &addr->next;
+            continue;
+        }
+
+        *addr_ptr = addr->next;
+        mdns_mem_free(addr);
+
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+        if (record != 0) {
+            entry->addr_sync_records &= ~record;
+        }
+#endif
     }
 }
 
@@ -630,8 +669,8 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
         // Base PTR goodbye will remove the whole service cache entry.
         // So we need to notify all resolvers of the service goodbye.
         if (base_ptr_updated) {
-            if (!mdns_priv_resolver_notify_goodbye_from_service_cache(owner_entry, service_entry,
-                                                                      MDNS_CACHE_RECORD_SRV | MDNS_CACHE_RECORD_TXT)) {
+            if (!mdns_priv_resolver_notify_goodbye_from_cache(owner_entry, service_entry,
+                                                              MDNS_CACHE_RECORD_SRV | MDNS_CACHE_RECORD_TXT)) {
                 ESP_LOGE(TAG, "Failed to notify resolvers goodbye");
             }
         }
@@ -742,7 +781,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
 
 #ifdef CONFIG_MDNS_ENABLE_RESOLVER
         // Notify the SRV resolver of goodbye before removing the SRV record from cache.
-        if (!mdns_priv_resolver_notify_goodbye_from_service_cache(owner_entry, service_entry, MDNS_CACHE_RECORD_SRV)) {
+        if (!mdns_priv_resolver_notify_goodbye_from_cache(owner_entry, service_entry, MDNS_CACHE_RECORD_SRV)) {
             ESP_LOGE(TAG, "Failed to notify SRV resolver goodbye");
         }
 #endif // CONFIG_MDNS_ENABLE_RESOLVER
@@ -893,7 +932,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
 
 #ifdef CONFIG_MDNS_ENABLE_RESOLVER
         // Notify the TXT resolver of goodbye before removing the TXT record from cache.
-        if (!mdns_priv_resolver_notify_goodbye_from_service_cache(owner_entry, service_entry, MDNS_CACHE_RECORD_TXT)) {
+        if (!mdns_priv_resolver_notify_goodbye_from_cache(owner_entry, service_entry, MDNS_CACHE_RECORD_TXT)) {
             ESP_LOGE(TAG, "Failed to notify TXT resolver goodbye");
         }
 #endif // CONFIG_MDNS_ENABLE_RESOLVER
@@ -950,6 +989,18 @@ static mdns_cache_update_result_t cache_update_addr(const esp_netif_t *esp_netif
     bool addr_added = false;
     bool ttl_changed = false;
     mdns_cache_update_result_t result = MDNS_CACHE_NO_CHANGE;
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+    mdns_resolver_type_t resolver_type = 0;
+    if (addr->type == ESP_IPADDR_TYPE_V4) {
+        resolver_type = MDNS_RESOLVER_TYPE_A;
+    } else if (addr->type == ESP_IPADDR_TYPE_V6) {
+        resolver_type = MDNS_RESOLVER_TYPE_AAAA;
+    } else {
+        ESP_LOGE(TAG, "Invalid address type: %d", addr->type);
+        return MDNS_CACHE_ERROR;
+    }
+    mdns_cache_record_mask_t resolver_record = resolver_type == MDNS_RESOLVER_TYPE_A ? MDNS_CACHE_RECORD_A : MDNS_CACHE_RECORD_AAAA;
+#endif // CONFIG_MDNS_ENABLE_RESOLVER
 
     if (ttl == 0) {
         entry = cache_find_entry(hostname, esp_netif, ip_protocol);
@@ -960,17 +1011,25 @@ static mdns_cache_update_result_t cache_update_addr(const esp_netif_t *esp_netif
         // Remove addr
         mdns_cache_addr_t **addr_ptr = &entry->addr_list;
         while (*addr_ptr) {
-            if (addr_equal(&(*addr_ptr)->addr, addr)) {
+            if (mdns_utils_addr_equal(&(*addr_ptr)->addr, addr)) {
                 mdns_cache_addr_t *removed_addr = *addr_ptr;
                 *addr_ptr = removed_addr->next;
                 mdns_mem_free(removed_addr);
 
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+                // Remove the address first, then notify the address resolver of existing addresses.
+                if (!mdns_priv_resolver_notify_goodbye_from_cache(entry, NULL, resolver_record)) {
+                    ESP_LOGE(TAG, "Failed to notify address resolver goodbye");
+                }
+                entry->addr_sync_records &= ~resolver_record;
+#endif // CONFIG_MDNS_ENABLE_RESOLVER
+#ifdef CONFIG_MDNS_ENABLE_BROWSE
                 for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
                     service_cache_mark_sync_out(service, MDNS_CACHE_UPDATED,
-                                                MDNS_CACHE_RECORD_ADDR | MDNS_CACHE_RECORD_BROWSE_SHARED,
+                                                MDNS_CACHE_RECORD_BROWSE_SHARED,
                                                 MDNS_CACHE_CONSUMER_BROWSE);
                 }
-
+#endif // CONFIG_MDNS_ENABLE_BROWSE
                 cache_remove_entry_if_empty(entry);
 
                 return MDNS_CACHE_REMOVED;
@@ -989,7 +1048,7 @@ static mdns_cache_update_result_t cache_update_addr(const esp_netif_t *esp_netif
 
     mdns_cache_addr_t *addr_entry = entry->addr_list;
     while (addr_entry) {
-        if (addr_equal(&addr_entry->addr, addr)) {
+        if (mdns_utils_addr_equal(&addr_entry->addr, addr)) {
             ttl_changed = update_ttl(&addr_entry->ttl, ttl);
             break;
         }
@@ -1011,11 +1070,17 @@ static mdns_cache_update_result_t cache_update_addr(const esp_netif_t *esp_netif
     }
 
     result = (addr_added || ttl_changed) ? MDNS_CACHE_UPDATED : MDNS_CACHE_NO_CHANGE;
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+    if (result == MDNS_CACHE_UPDATED) {
+        entry->addr_sync_records |= resolver_record;
+    }
+#endif // CONFIG_MDNS_ENABLE_RESOLVER
+#ifdef CONFIG_MDNS_ENABLE_BROWSE
     for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
-        service_cache_mark_sync_out(service, result, MDNS_CACHE_RECORD_ADDR | MDNS_CACHE_RECORD_BROWSE_SHARED,
+        service_cache_mark_sync_out(service, result, MDNS_CACHE_RECORD_BROWSE_SHARED,
                                     MDNS_CACHE_CONSUMER_BROWSE);
     }
-
+#endif // CONFIG_MDNS_ENABLE_BROWSE
     return result;
 }
 
@@ -1180,6 +1245,15 @@ error:
 void mdns_priv_cache_process_sync(void)
 {
     for (mdns_cache_entry_t *entry = s_cache; entry; entry = entry->next) {
+#ifdef CONFIG_MDNS_ENABLE_RESOLVER
+        mdns_cache_record_mask_t addr_records = entry->addr_sync_records & MDNS_CACHE_ADDR_RECORD_MASK;
+        if (addr_records != 0) {
+            mdns_cache_record_mask_t completed_records = mdns_priv_resolver_update_from_cache(entry, NULL, addr_records);
+            if (completed_records != 0) {
+                entry->addr_sync_records &= ~completed_records;
+            }
+        }
+#endif
         for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
 #ifdef CONFIG_MDNS_ENABLE_BROWSE
             if (service->sync_consumers & MDNS_CACHE_CONSUMER_BROWSE) {
@@ -1195,7 +1269,7 @@ void mdns_priv_cache_process_sync(void)
 #ifdef CONFIG_MDNS_ENABLE_RESOLVER
             if (service->sync_consumers & MDNS_CACHE_CONSUMER_RESOLVER) {
                 mdns_cache_record_mask_t resolver_records = service->sync_records & MDNS_CACHE_RECORD_RESOLVER_MASK;
-                mdns_cache_record_mask_t completed_records = mdns_priv_resolver_update_from_service_cache(entry, service, resolver_records);
+                mdns_cache_record_mask_t completed_records = mdns_priv_resolver_update_from_cache(entry, service, resolver_records);
                 if (completed_records != 0) {
                     service_cache_clear_sync_out(service, MDNS_CACHE_CONSUMER_RESOLVER, completed_records);
                 }
@@ -1233,10 +1307,23 @@ bool mdns_priv_cache_notify_resolver(mdns_resolver_t *resolver)
 
     bool notified = true;
 
-    for (mdns_cache_entry_t *entry = s_cache; entry; entry = entry->next) {
-        for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
-            notified &= mdns_priv_resolver_notify_from_service_cache(entry, service, resolver);
+    switch (resolver->type) {
+    case MDNS_RESOLVER_TYPE_SRV:
+    case MDNS_RESOLVER_TYPE_TXT:
+        for (mdns_cache_entry_t *entry = s_cache; entry; entry = entry->next) {
+            for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
+                notified &= mdns_priv_resolver_notify_from_cache(entry, service, resolver);
+            }
         }
+        break;
+    case MDNS_RESOLVER_TYPE_A:
+    case MDNS_RESOLVER_TYPE_AAAA:
+        for (mdns_cache_entry_t *entry = s_cache; entry; entry = entry->next) {
+            notified &= mdns_priv_resolver_notify_from_cache(entry, NULL, resolver);
+        }
+        break;
+    default:
+        return false;
     }
 
     return notified;
@@ -1289,6 +1376,7 @@ void mdns_priv_cache_remove_address_list_if_unused(const char *hostname, mdns_re
                 cache = cache->next;
             }
 #endif
+
             if (!in_use) {
                 // Clean up unused IPv4/IPv6 addresses in address list.
                 mdns_cache_addr_t **addr_ptr = &entry->addr_list;
@@ -1301,6 +1389,9 @@ void mdns_priv_cache_remove_address_list_if_unused(const char *hostname, mdns_re
                         addr_ptr = &(*addr_ptr)->next;
                     }
                 }
+
+                mdns_cache_record_mask_t record = (type == MDNS_RESOLVER_TYPE_A) ? MDNS_CACHE_RECORD_A : MDNS_CACHE_RECORD_AAAA;
+                entry->addr_sync_records &= ~record;
             }
 
             if (!entry->addr_list && !entry->service_cache_list) {

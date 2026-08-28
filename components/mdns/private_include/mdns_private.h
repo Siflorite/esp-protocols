@@ -425,7 +425,8 @@ typedef enum {
     // Resolver update flags
     MDNS_CACHE_RECORD_SRV           = (1U << 3),
     MDNS_CACHE_RECORD_TXT           = (1U << 4),
-    MDNS_CACHE_RECORD_ADDR          = (1U << 5),
+    MDNS_CACHE_RECORD_A             = (1U << 5),
+    MDNS_CACHE_RECORD_AAAA          = (1U << 6),
 } mdns_cache_record_type_t;
 
 typedef uint8_t mdns_cache_record_mask_t;
@@ -486,6 +487,7 @@ typedef struct mdns_cache_entry_s {
     mdns_ip_protocol_t ip_protocol;
 
     mdns_cache_addr_t *addr_list;
+    mdns_cache_record_mask_t addr_sync_records; /*!< bitmask of records to sync, see @ref mdns_cache_record_type_t */
     mdns_service_cache_t *service_cache_list;
     struct mdns_cache_entry_s *next;
 } mdns_cache_entry_t;

@@ -160,3 +160,12 @@ static inline uint8_t mdns_utils_append_u8(uint8_t *packet, uint16_t *index, uin
  * @param txt Pointer to the TXT linked list.
  */
 void mdns_utils_free_txt_linked_list(mdns_txt_linked_item_t *txt);
+
+/**
+ * @brief Checks if the two addresses are equal
+ *
+ * @param a First address
+ * @param b Second address
+ * @return true if the two addresses are equal, false otherwise
+ */
+bool mdns_utils_addr_equal(const esp_ip_addr_t *a, const esp_ip_addr_t *b);
