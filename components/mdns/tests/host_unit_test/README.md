@@ -29,6 +29,7 @@ Available test suites (pass one to `-DUNIT_TESTS=`):
 | `test_receiver` | Packet receive / parse path |
 | `test_sender` | Packet send path |
 | `test_browse` | Browse / TXT comparison regressions |
+| `test_cache` | Cached records insertion, update, synchronization, and cleanup |
 
 Example — build and run the receiver tests:
 
