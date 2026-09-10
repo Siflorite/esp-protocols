@@ -90,13 +90,6 @@ void mdns_priv_browse_send_by_ip_protocol(mdns_if_t mdns_if, mdns_ip_protocol_t 
     }
 }
 
-void mdns_priv_browse_send_all(mdns_if_t mdns_if)
-{
-    for (uint8_t protocol_idx = 0; protocol_idx < MDNS_IP_PROTOCOL_MAX; protocol_idx++) {
-        mdns_priv_browse_send_by_ip_protocol(mdns_if, (mdns_ip_protocol_t) protocol_idx);
-    }
-}
-
 void mdns_priv_browse_free(void)
 {
     while (s_browse) {

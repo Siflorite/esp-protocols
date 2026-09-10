@@ -1392,7 +1392,6 @@ static void mdns_parse_packet(mdns_rx_packet_t *packet)
 clear_rx_packet:
 #ifdef CONFIG_MDNS_ENABLE_BROWSE
     rx_staged_ips_apply(mdns_priv_get_esp_netif(packet->tcpip_if), packet->ip_protocol, staged_ips);
-    mdns_priv_cache_process_sync();
     rx_staged_ip_free(staged_ips);
 #endif /* CONFIG_MDNS_ENABLE_BROWSE */
     while (parsed_packet->questions) {
@@ -1442,6 +1441,10 @@ void mdns_priv_receive_action(mdns_action_t *action, mdns_action_subtype_t type)
     }
     if (type == ACTION_RUN) {
         mdns_parse_packet(action->data.rx_handle.packet);
+#ifdef CONFIG_MDNS_ENABLE_BROWSE
+        mdns_priv_cache_remove_expired_records(esp_timer_get_time());
+        mdns_priv_cache_process_sync();
+#endif
         mdns_priv_packet_free(action->data.rx_handle.packet);
     } else if (type == ACTION_CLEANUP) {
         mdns_priv_packet_free(action->data.rx_handle.packet);

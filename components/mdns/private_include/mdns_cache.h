@@ -135,6 +135,16 @@ mdns_cache_update_result_t mdns_priv_cache_update_existing_addr(const esp_netif_
                                                                 const char *hostname, const esp_ip_addr_t *addr, uint32_t ttl);
 
 /**
+ * @brief Remove expired records from the entire cache.
+ *
+ * @param now_us The current time in microseconds from esp_timer_get_time().
+ *
+ * @note This function is called in mDNS service task while holding service lock.
+ *       PTR expiration notifies browses immediately, other records are marked to-sync for browses.
+ */
+void mdns_priv_cache_remove_expired_records(int64_t now_us);
+
+/**
  * @brief Clear all cache entries.
  */
 void mdns_priv_cache_clear(void);

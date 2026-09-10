@@ -112,6 +112,8 @@
 
 #define MDNS_TIMER_PERIOD_US        (CONFIG_MDNS_TIMER_PERIOD_MS*1000)
 
+#define MDNS_US_PER_SEC             1000000LL
+
 #define queueToEnd(type, queue, item)       \
     if (!queue) {                           \
         queue = item;                       \
@@ -417,6 +419,7 @@ typedef uint8_t mdns_cache_record_mask_t;
 typedef struct mdns_cache_addr_s {
     esp_ip_addr_t addr;
     uint32_t ttl;
+    int64_t expires_at_us; /*!< absolute expiration time in microseconds */
     struct mdns_cache_addr_s *next;
 } mdns_cache_addr_t;
 
@@ -428,18 +431,21 @@ typedef struct mdns_service_cache_s {
     char *service;
     char *proto;
     // PTR
-    bool ptr_present;   /*!< true if PTR record is present */
+    bool ptr_present;                           /*!< true if PTR record is present */
     uint32_t ptr_ttl;
+    int64_t ptr_expires_at_us;                  /*!< PTR record absolute expiration time in microseconds */
     // SRV
-    bool srv_present;   /*!< true if SRV record is present */
+    bool srv_present;                           /*!< true if SRV record is present */
     uint16_t priority;
     uint16_t weight;
     uint16_t port;
     uint32_t srv_ttl;
+    int64_t srv_expires_at_us;                  /*!< SRV record absolute expiration time in microseconds */
     // TXT
-    bool txt_present;   /*!< true if TXT record is present */
+    bool txt_present;                           /*!< true if TXT record is present */
     mdns_txt_linked_item_t *txt_list;
     uint32_t txt_ttl;
+    int64_t txt_expires_at_us;                  /*!< TXT record absolute expiration time in microseconds */
     // To-sync flags
     mdns_cache_record_mask_t sync_records;      /*!< bitmask of records to sync, see @ref mdns_cache_record_type_t */
     mdns_cache_consumer_mask_t sync_consumers;  /*!< bitmask of consumers to sync, see @ref mdns_cache_consumer_type_t */
