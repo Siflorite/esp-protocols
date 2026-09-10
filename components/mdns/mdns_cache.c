@@ -371,39 +371,6 @@ static bool cache_remove_service(mdns_cache_entry_t *entry, mdns_service_cache_t
     return false;
 }
 
-/**
- * @brief Remove all service caches by service and proto.
- *
- * @param service       The service name to remove.
- * @param proto         The protocol to remove.
- */
-static void remove_service_caches(const char *service, const char *proto)
-{
-    mdns_cache_entry_t **entry_ptr = &s_cache;
-
-    while (*entry_ptr) {
-        mdns_cache_entry_t *entry = *entry_ptr;
-        mdns_service_cache_t **service_ptr = &entry->service_cache_list;
-
-        while (*service_ptr) {
-            mdns_service_cache_t *cache = *service_ptr;
-            if (names_equal(cache->service, service) && names_equal(cache->proto, proto)) {
-                *service_ptr = cache->next;
-                service_entry_free(cache);
-                continue;
-            }
-            service_ptr = &(*service_ptr)->next;
-        }
-
-        if (!entry->service_cache_list) {
-            *entry_ptr = entry->next;
-            cache_entry_free(entry);
-            continue;
-        }
-        entry_ptr = &(*entry_ptr)->next;
-    }
-}
-
 mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol,
                                                       const char *instance, const char *service, const char *proto,
                                                       uint32_t ttl)
@@ -782,7 +749,18 @@ mdns_cache_update_result_t mdns_priv_cache_update_addr(const esp_netif_t *esp_ne
 mdns_cache_update_result_t mdns_priv_cache_update_existing_addr(const esp_netif_t *esp_netif, mdns_ip_protocol_t ip_protocol,
                                                                 const char *hostname, const esp_ip_addr_t *addr, uint32_t ttl)
 {
-    return cache_update_addr(esp_netif, ip_protocol, hostname, addr, ttl, false);
+    mdns_cache_entry_t *entry = cache_find_entry(hostname, esp_netif, ip_protocol);
+    if (!entry) {
+        return MDNS_CACHE_NO_CHANGE;
+    }
+
+    // Only update ADDR records if consumers exist
+    for (const mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
+        if (mdns_priv_browse_has_service(service->service, service->proto)) {
+            return cache_update_addr(esp_netif, ip_protocol, hostname, addr, ttl, false);
+        }
+    }
+    return MDNS_CACHE_NO_CHANGE;
 }
 
 void mdns_priv_cache_remove_expired_records(int64_t now_us)
@@ -1039,17 +1017,4 @@ bool mdns_priv_cache_notify_browse(mdns_browse_t *browse)
     }
 
     return notified;
-}
-
-void mdns_priv_cache_remove_service_cache_if_unused(const char *service, const char *proto)
-{
-    if (mdns_utils_str_null_or_empty(service) || mdns_utils_str_null_or_empty(proto)) {
-        return;
-    }
-
-    if (mdns_priv_browse_has_service(service, proto)) {
-        return;
-    }
-
-    remove_service_caches(service, proto);
 }
