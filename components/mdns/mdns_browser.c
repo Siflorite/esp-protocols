@@ -115,7 +115,7 @@ static bool browse_matches_identity(const mdns_browse_t *browse, const char *ser
 bool mdns_priv_browse_has_service(const char *service, const char *proto)
 {
     for (const mdns_browse_t *it = s_browse; it; it = it->next) {
-        if (it->state != BROWSE_OFF && browse_matches_identity(it, service, proto)) {
+        if (it->state == BROWSE_RUNNING && browse_matches_identity(it, service, proto)) {
             return true;
         }
     }
@@ -134,7 +134,6 @@ static void browse_finish(mdns_browse_t *browse)
     for (mdns_browse_t *it = s_browse; it; it = it->next) {
         if (it == browse) {
             queueDetach(mdns_browse_t, s_browse, it);
-            mdns_priv_cache_remove_service_cache_if_unused(it->service, it->proto);
             browse_item_free(it);
             return;
         }

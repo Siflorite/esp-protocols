@@ -124,7 +124,8 @@ mdns_cache_update_result_t mdns_priv_cache_update_addr(const esp_netif_t *esp_ne
  * @param ttl           The TTL.
  *
  * @return The result of the update, see @ref mdns_cache_update_result_t.
- *         If the cache entry does not exist, return MDNS_CACHE_NO_CHANGE.
+ *         If the cache entry does not exist, or no consumers subscribe to the hostname or service under the hostname,
+ *         return MDNS_CACHE_NO_CHANGE.
  *
  * @note When an A/AAAA record is updated (added, removed, or updated),
  *       all services under this cache entry will be marked to-sync for browses.
@@ -174,14 +175,6 @@ void mdns_priv_cache_process_sync(void);
  * @return true if successfully notified, false otherwise
  */
 bool mdns_priv_cache_notify_browse(mdns_browse_t *browse);
-
-/**
- * @brief Remove specific service cache entries if no consumers subscribe to them.
- *
- * @param service Service name.
- * @param proto Protocol name.
- */
-void mdns_priv_cache_remove_service_cache_if_unused(const char *service, const char *proto);
 #ifdef __cplusplus
 }
 #endif
