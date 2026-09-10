@@ -84,6 +84,8 @@ bool mdns_priv_browse_notify_from_service_cache(const mdns_cache_entry_t *entry,
 /**
  * @brief Notify the affected browse about a PTR goodbye.
  *
+ * Used for both TTL=0 goodbye and natural expiration.
+ *
  * @note Must be called before the PTR service cache is removed to avoid UAF.
  */
 bool mdns_priv_browse_notify_ptr_goodbye_from_service_cache(const mdns_cache_entry_t *entry,

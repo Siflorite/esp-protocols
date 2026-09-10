@@ -420,20 +420,21 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
     bool new_service = false;
 
     if (ttl == 0) {
-        if (!service_entry) {
+        if (!service_entry || !service_entry->ptr_present) {
             return MDNS_CACHE_NO_CHANGE;
         }
 
-        if (service_entry->ptr_present) {
-            // Notify PTR goodbye before the service cache is removed.
-            bool notified = mdns_priv_browse_notify_ptr_goodbye_from_service_cache(owner_entry, service_entry);
-            if (!notified) {
-                ESP_LOGE(TAG, "Failed to notify PTR goodbye");
-            }
+        if (!mdns_priv_browse_notify_ptr_goodbye_from_service_cache(owner_entry, service_entry)) {
+            ESP_LOGE(TAG, "Failed to notify PTR goodbye");
         }
+        service_entry->ptr_present = false;
+        service_entry->ptr_ttl = 0;
+        service_entry->ptr_expires_at_us = 0;
 
-        // A PTR goodbye removes the whole service cache entry.
-        return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
+        if (service_cache_is_empty(service_entry)) {
+            return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
+        }
+        return MDNS_CACHE_UPDATED;
     }
 
     if (!service_entry) {
@@ -518,6 +519,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
         service_entry->weight = 0;
         service_entry->port = 0;
         service_entry->srv_ttl = 0;
+        service_entry->srv_expires_at_us = 0;
 
         if (service_cache_is_empty(service_entry)) {
             return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
@@ -657,6 +659,7 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
         service_entry->txt_list = NULL;
         service_entry->txt_present = false;
         service_entry->txt_ttl = 0;
+        service_entry->txt_expires_at_us = 0;
 
         if (service_cache_is_empty(service_entry)) {
             return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
