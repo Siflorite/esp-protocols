@@ -16,6 +16,8 @@
 static const char *TAG = "mdns_cache";
 
 static mdns_cache_entry_t *s_cache;
+static mdns_cache_expiry_t *s_expiry;
+static bool s_sync_pending;
 
 static inline bool names_equal(const char *a, const char *b)
 {
@@ -25,6 +27,55 @@ static inline bool names_equal(const char *a, const char *b)
 static inline bool nullable_names_equal(const char *a, const char *b)
 {
     return (mdns_utils_str_null_or_empty(a) && mdns_utils_str_null_or_empty(b)) || names_equal(a, b);
+}
+
+static inline int64_t calc_expiration_time_us(uint32_t ttl)
+{
+    return esp_timer_get_time() + (int64_t)ttl * MDNS_US_PER_SEC;
+}
+
+static mdns_cache_expiry_t *expiry_new(mdns_cache_entry_t *entry, mdns_service_cache_t *service,
+                                       mdns_cache_addr_t *addr, mdns_cache_record_type_t type, uint32_t ttl)
+{
+    mdns_cache_expiry_t *node = mdns_mem_calloc(1, sizeof(mdns_cache_expiry_t));
+    if (!node) {
+        HOOK_MALLOC_FAILED;
+        return NULL;
+    }
+
+    node->entry = entry;
+    node->service = service;
+    node->addr = addr;
+    node->record_mask = (mdns_cache_record_mask_t)type;
+    node->expires_at_us = ttl == 0 ? 0 : calc_expiration_time_us(ttl);
+    node->queued = false;
+    return node;
+}
+
+static void expiry_detach(mdns_cache_expiry_t *node)
+{
+    if (!node) {
+        return;
+    }
+    if (node->queued) {
+        queueDetach(mdns_cache_expiry_t, s_expiry, node);
+        node->queued = false;
+    }
+}
+
+static void expiry_schedule(mdns_cache_expiry_t *node, uint32_t ttl)
+{
+    expiry_detach(node);
+
+    node->expires_at_us = ttl == 0 ? 0 : calc_expiration_time_us(ttl);
+
+    mdns_cache_expiry_t **link = &s_expiry;
+    while (*link && (*link)->expires_at_us < node->expires_at_us) {
+        link = &(*link)->next;
+    }
+    node->next = *link;
+    *link = node;
+    node->queued = true;
 }
 
 static bool update_ttl(uint32_t *cached_ttl, uint32_t ttl)
@@ -84,6 +135,7 @@ static void service_cache_mark_sync_out(mdns_service_cache_t *service_entry, mdn
     if (service_entry && (result == MDNS_CACHE_ADDED || result == MDNS_CACHE_UPDATED)) {
         service_entry->sync_records |= (mdns_cache_record_mask_t)record_type;
         service_entry->sync_consumers |= consumer;
+        s_sync_pending = true;
     }
 }
 
@@ -94,22 +146,14 @@ static void service_cache_mark_sync_out(mdns_service_cache_t *service_entry, mdn
  *
  * @param service_entry Service cache entry to clear sync out flags for.
  * @param consumer Consumer type to clear sync out flags for.
- * @param record_type Record type to clear sync out flags for.
  */
-static void service_cache_clear_sync_out(mdns_service_cache_t *service_entry, mdns_cache_consumer_type_t consumer,
-                                         mdns_cache_record_mask_t records)
+static void service_cache_clear_sync_out(mdns_service_cache_t *service_entry, mdns_cache_consumer_type_t consumer)
 {
     if (!service_entry) {
         return;
     }
 
-    switch (consumer) {
-    case MDNS_CACHE_CONSUMER_BROWSE:
-        service_entry->sync_consumers &= ~(mdns_cache_consumer_mask_t)consumer;
-        break;
-    default:
-        return;
-    }
+    service_entry->sync_consumers &= ~(mdns_cache_consumer_mask_t)consumer;
 
     if (service_entry->sync_consumers == 0) {
         service_entry->sync_records = 0;
@@ -197,6 +241,13 @@ bool mdns_priv_cache_host_has_service(const char *hostname, const esp_netif_t *e
 
 static void service_entry_free(mdns_service_cache_t *service_entry)
 {
+    expiry_detach(service_entry->ptr_expiry);
+    expiry_detach(service_entry->srv_expiry);
+    expiry_detach(service_entry->txt_expiry);
+    mdns_mem_free(service_entry->ptr_expiry);
+    mdns_mem_free(service_entry->srv_expiry);
+    mdns_mem_free(service_entry->txt_expiry);
+
     mdns_mem_free(service_entry->instance_name);
     mdns_mem_free(service_entry->service);
     mdns_mem_free(service_entry->proto);
@@ -216,6 +267,7 @@ static void cache_entry_free(mdns_cache_entry_t *entry)
     while (entry->addr_list) {
         mdns_cache_addr_t *addr = entry->addr_list;
         entry->addr_list = entry->addr_list->next;
+        expiry_detach(&addr->expiry);
         mdns_mem_free(addr);
     }
     while (entry->service_cache_list) {
@@ -344,9 +396,17 @@ static bool cache_move_service(mdns_cache_entry_t *old_entry, mdns_cache_entry_t
             cache->next = new_entry->service_cache_list;
             new_entry->service_cache_list = cache;
 
-            if (!old_entry->service_cache_list) {
-                cache_remove_entry(old_entry);
+            if (cache->ptr_expiry) {
+                cache->ptr_expiry->entry = new_entry;
             }
+            if (cache->srv_expiry) {
+                cache->srv_expiry->entry = new_entry;
+            }
+            if (cache->txt_expiry) {
+                cache->txt_expiry->entry = new_entry;
+            }
+
+            cache_remove_entry_if_empty(old_entry);
             return true;
         }
         old_entry_cache = &(*old_entry_cache)->next;
@@ -356,10 +416,10 @@ static bool cache_move_service(mdns_cache_entry_t *old_entry, mdns_cache_entry_t
     return false;
 }
 
-static bool cache_remove_service(mdns_cache_entry_t *entry, mdns_service_cache_t *service_entry)
+static void cache_remove_service_if_empty(mdns_cache_entry_t *entry, mdns_service_cache_t *service_entry)
 {
-    if (!entry || !service_entry) {
-        return false;
+    if (!entry || !service_cache_is_empty(service_entry)) {
+        return;
     }
 
     mdns_service_cache_t **service_entry_ptr = &entry->service_cache_list;
@@ -367,15 +427,11 @@ static bool cache_remove_service(mdns_cache_entry_t *entry, mdns_service_cache_t
         if (*service_entry_ptr == service_entry) {
             *service_entry_ptr = service_entry->next;
             service_entry_free(service_entry);
-            if (!entry->service_cache_list) {
-                cache_remove_entry(entry);
-            }
-            return true;
+            cache_remove_entry_if_empty(entry);
+            return;
         }
         service_entry_ptr = &(*service_entry_ptr)->next;
     }
-
-    return false;
 }
 
 /**
@@ -427,20 +483,13 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
     bool new_service = false;
 
     if (ttl == 0) {
-        if (!service_entry) {
+        if (!service_entry || !service_entry->ptr_present) {
             return MDNS_CACHE_NO_CHANGE;
         }
 
-        if (service_entry->ptr_present) {
-            // Notify PTR goodbye before the service cache is removed.
-            bool notified = mdns_priv_browse_notify_ptr_goodbye_from_service_cache(owner_entry, service_entry);
-            if (!notified) {
-                ESP_LOGE(TAG, "Failed to notify PTR goodbye");
-            }
-        }
-
-        // A PTR goodbye removes the whole service cache entry.
-        return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
+        service_entry->ptr_ttl = 0;
+        expiry_schedule(service_entry->ptr_expiry, 0);
+        return MDNS_CACHE_UPDATED;
     }
 
     if (!service_entry) {
@@ -458,6 +507,15 @@ mdns_cache_update_result_t mdns_priv_cache_update_ptr(const esp_netif_t *esp_net
         new_service = true;
     }
 
+    if (!service_entry->ptr_expiry) {
+        service_entry->ptr_expiry = expiry_new(owner_entry, service_entry, NULL, MDNS_CACHE_RECORD_PTR, ttl);
+        if (!service_entry->ptr_expiry) {
+            cache_remove_service_if_empty(owner_entry, service_entry);
+            return MDNS_CACHE_ERROR;
+        }
+    }
+
+    expiry_schedule(service_entry->ptr_expiry, ttl);
     bool changed = !service_entry->ptr_present;
     service_entry->ptr_present = true;
     changed |= update_ttl(&service_entry->ptr_ttl, ttl);
@@ -512,25 +570,25 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
                                                              proto, &owner_entry);
     mdns_cache_entry_t *host_entry = NULL;
     mdns_cache_update_result_t result = MDNS_CACHE_NO_CHANGE;
+    mdns_cache_expiry_t *srv_expiry = service_entry ? service_entry->srv_expiry : NULL;
+    bool new_srv_expiry = false;
 
     if (ttl == 0) {
         if (!service_entry || !service_entry->srv_present) {
             return MDNS_CACHE_NO_CHANGE;
         }
 
-        service_entry->srv_present = false;
-        service_entry->priority = 0;
-        service_entry->weight = 0;
-        service_entry->port = 0;
         service_entry->srv_ttl = 0;
-
-        if (service_cache_is_empty(service_entry)) {
-            return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
-        }
-
-        service_cache_mark_sync_out(service_entry, MDNS_CACHE_UPDATED, MDNS_CACHE_RECORD_SRV, MDNS_CACHE_CONSUMER_BROWSE);
-
+        expiry_schedule(service_entry->srv_expiry, 0);
         return MDNS_CACHE_UPDATED;
+    }
+
+    if (!srv_expiry) {
+        srv_expiry = expiry_new(NULL, NULL, NULL, MDNS_CACHE_RECORD_SRV, ttl);
+        if (!srv_expiry) {
+            return MDNS_CACHE_ERROR;
+        }
+        new_srv_expiry = true;
     }
 
     if (owner_entry && names_equal(owner_entry->hostname, hostname)) {
@@ -538,6 +596,9 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
     } else {
         host_entry = cache_get_or_add_entry(hostname, esp_netif, ip_protocol);
         if (!host_entry) {
+            if (new_srv_expiry) {
+                mdns_mem_free(srv_expiry);
+            }
             return MDNS_CACHE_ERROR;
         }
     }
@@ -545,16 +606,28 @@ mdns_cache_update_result_t mdns_priv_cache_update_srv(const esp_netif_t *esp_net
     if (!service_entry) {
         service_entry = cache_add_service(host_entry, instance, service, proto);
         if (!service_entry) {
+            if (new_srv_expiry) {
+                mdns_mem_free(srv_expiry);
+            }
             cache_remove_entry_if_empty(host_entry);
             return MDNS_CACHE_ERROR;
         }
         result = MDNS_CACHE_ADDED;
     } else if (owner_entry != host_entry) {
         if (!cache_move_service(owner_entry, host_entry, service_entry)) {
+            if (new_srv_expiry) {
+                mdns_mem_free(srv_expiry);
+            }
+            cache_remove_entry_if_empty(host_entry);
             return MDNS_CACHE_ERROR;
         }
         result = MDNS_CACHE_UPDATED;
     }
+
+    srv_expiry->entry = host_entry;
+    srv_expiry->service = service_entry;
+    service_entry->srv_expiry = srv_expiry;
+    expiry_schedule(service_entry->srv_expiry, ttl);
 
     mdns_cache_update_result_t srv_result = service_cache_srv_update(service_entry, priority, weight, port, ttl);
     if (result == MDNS_CACHE_NO_CHANGE) {
@@ -657,17 +730,8 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
             return MDNS_CACHE_NO_CHANGE;
         }
 
-        mdns_utils_free_txt_linked_list(service_entry->txt_list);
-        service_entry->txt_list = NULL;
-        service_entry->txt_present = false;
         service_entry->txt_ttl = 0;
-
-        if (service_cache_is_empty(service_entry)) {
-            return cache_remove_service(owner_entry, service_entry) ? MDNS_CACHE_REMOVED : MDNS_CACHE_NO_CHANGE;
-        }
-
-        service_cache_mark_sync_out(service_entry, MDNS_CACHE_UPDATED, MDNS_CACHE_RECORD_TXT, MDNS_CACHE_CONSUMER_BROWSE);
-
+        expiry_schedule(service_entry->txt_expiry, 0);
         return MDNS_CACHE_UPDATED;
     }
 
@@ -687,6 +751,16 @@ mdns_cache_update_result_t mdns_priv_cache_update_txt(const esp_netif_t *esp_net
 
         new_service = true;
     }
+
+    if (!service_entry->txt_expiry) {
+        service_entry->txt_expiry = expiry_new(owner_entry, service_entry, NULL, MDNS_CACHE_RECORD_TXT, ttl);
+        if (!service_entry->txt_expiry) {
+            mdns_utils_free_txt_linked_list(txt);
+            cache_remove_service_if_empty(owner_entry, service_entry);
+            return MDNS_CACHE_ERROR;
+        }
+    }
+    expiry_schedule(service_entry->txt_expiry, ttl);
 
     result = service_cache_txt_update(service_entry, txt, ttl);
 
@@ -714,22 +788,11 @@ static mdns_cache_update_result_t cache_update_addr(const esp_netif_t *esp_netif
         }
 
         // Remove addr
-        mdns_cache_addr_t **addr_ptr = &entry->addr_list;
-        while (*addr_ptr) {
-            if (addr_equal(&(*addr_ptr)->addr, addr)) {
-                mdns_cache_addr_t *removed_addr = *addr_ptr;
-                *addr_ptr = removed_addr->next;
-                mdns_mem_free(removed_addr);
-
-                for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
-                    service_cache_mark_sync_out(service, MDNS_CACHE_UPDATED, MDNS_CACHE_RECORD_ADDR, MDNS_CACHE_CONSUMER_BROWSE);
-                }
-
-                cache_remove_entry_if_empty(entry);
-
+        for (mdns_cache_addr_t *it = entry->addr_list; it; it = it->next) {
+            if (addr_equal(&it->addr, addr)) {
+                expiry_schedule(&it->expiry, 0);
                 return MDNS_CACHE_REMOVED;
             }
-            addr_ptr = &(*addr_ptr)->next;
         }
 
         return MDNS_CACHE_NO_CHANGE;
@@ -744,6 +807,7 @@ static mdns_cache_update_result_t cache_update_addr(const esp_netif_t *esp_netif
     mdns_cache_addr_t *addr_entry = entry->addr_list;
     while (addr_entry) {
         if (addr_equal(&addr_entry->addr, addr)) {
+            expiry_schedule(&addr_entry->expiry, ttl);
             ttl_changed = update_ttl(&addr_entry->ttl, ttl);
             break;
         }
@@ -759,6 +823,10 @@ static mdns_cache_update_result_t cache_update_addr(const esp_netif_t *esp_netif
         }
         new_addr->addr = *addr;
         new_addr->ttl = ttl;
+        new_addr->expiry.record_mask = MDNS_CACHE_RECORD_ADDR;
+        new_addr->expiry.entry = entry;
+        new_addr->expiry.addr = new_addr;
+        expiry_schedule(&new_addr->expiry, ttl);
         new_addr->next = entry->addr_list;
         entry->addr_list = new_addr;
         addr_added = true;
@@ -784,6 +852,110 @@ mdns_cache_update_result_t mdns_priv_cache_update_existing_addr(const esp_netif_
     return cache_update_addr(esp_netif, ip_protocol, hostname, addr, ttl, false);
 }
 
+void mdns_priv_cache_remove_expired_records(int64_t now_us)
+{
+    if (!s_expiry || s_expiry->expires_at_us > now_us) {
+        return;
+    }
+
+    mdns_cache_expiry_t *head = s_expiry;
+    mdns_cache_expiry_t *end = s_expiry;
+    mdns_cache_expiry_t *merged = NULL;
+    while (end->next && end->next->expires_at_us <= now_us) {
+        end = end->next;
+    }
+
+    s_expiry = end->next;
+    end->next = NULL;
+
+    // Remove expired addresses, and merge other expired records by entry+service
+    while (head) {
+        mdns_cache_expiry_t *node = head;
+        mdns_cache_expiry_t *matched = merged;
+        mdns_cache_entry_t *entry = node->entry;
+        mdns_service_cache_t *service = node->service;
+        head = node->next;
+
+        if (node->record_mask == MDNS_CACHE_RECORD_ADDR) {
+            mdns_cache_addr_t *addr = node->addr;
+            queueDetach(mdns_cache_addr_t, entry->addr_list, addr);
+            mdns_mem_free(addr);
+
+            for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
+                service_cache_mark_sync_out(service, MDNS_CACHE_UPDATED, MDNS_CACHE_RECORD_ADDR, MDNS_CACHE_CONSUMER_BROWSE);
+            }
+            cache_remove_entry_if_empty(entry);
+            continue;
+        }
+
+        if (!service) {
+            mdns_mem_free(node);
+            continue;
+        }
+        switch (node->record_mask) {
+        case MDNS_CACHE_RECORD_PTR:
+            service->ptr_expiry = NULL;
+            break;
+        case MDNS_CACHE_RECORD_SRV:
+            service->srv_expiry = NULL;
+            break;
+        case MDNS_CACHE_RECORD_TXT:
+            service->txt_expiry = NULL;
+            break;
+        default:
+            break;
+        }
+
+        while (matched && (matched->entry != entry || matched->service != service)) {
+            matched = matched->next;
+        }
+        if (matched) {
+            matched->record_mask |= node->record_mask;
+            mdns_mem_free(node);
+        } else {
+            node->next = merged;
+            merged = node;
+        }
+    }
+
+    // Clear expired service records
+    while (merged) {
+        mdns_cache_expiry_t *node = merged;
+        mdns_cache_entry_t *entry = node->entry;
+        mdns_service_cache_t *service = node->service;
+        mdns_cache_record_mask_t records = node->record_mask;
+        merged = node->next;
+
+        if (records & MDNS_CACHE_RECORD_PTR) {
+            service->ptr_present = false;
+            service->ptr_ttl = 0;
+            if (!mdns_priv_browse_notify_ptr_goodbye_from_service_cache(entry, service)) {
+                ESP_LOGE(TAG, "Failed to notify PTR expiration");
+            }
+        }
+        if (records & MDNS_CACHE_RECORD_SRV) {
+            service->srv_present = false;
+            service->priority = 0;
+            service->weight = 0;
+            service->port = 0;
+            service->srv_ttl = 0;
+        }
+        if (records & MDNS_CACHE_RECORD_TXT) {
+            service->txt_present = false;
+            mdns_utils_free_txt_linked_list(service->txt_list);
+            service->txt_list = NULL;
+            service->txt_ttl = 0;
+        }
+
+        if (service_cache_is_empty(service)) {
+            cache_remove_service_if_empty(entry, service);
+        } else {
+            service_cache_mark_sync_out(service, MDNS_CACHE_UPDATED, records, MDNS_CACHE_CONSUMER_BROWSE);
+        }
+        mdns_mem_free(node);
+    }
+}
+
 void mdns_priv_cache_clear(void)
 {
     while (s_cache) {
@@ -791,6 +963,8 @@ void mdns_priv_cache_clear(void)
         s_cache = s_cache->next;
         cache_entry_free(entry);
     }
+    s_expiry = NULL;
+    s_sync_pending = false;
 }
 
 static bool project_txt(const mdns_txt_linked_item_t *txt_list, mdns_txt_item_t **out_txt, uint8_t **out_value_len,
@@ -932,6 +1106,11 @@ error:
 
 void mdns_priv_cache_process_sync(void)
 {
+    if (!s_sync_pending) {
+        return;
+    }
+    s_sync_pending = false;
+
     for (mdns_cache_entry_t *entry = s_cache; entry; entry = entry->next) {
         for (mdns_service_cache_t *service = entry->service_cache_list; service; service = service->next) {
             if (service->sync_consumers & MDNS_CACHE_CONSUMER_BROWSE) {
@@ -939,7 +1118,7 @@ void mdns_priv_cache_process_sync(void)
                 if (!mdns_priv_browse_update_from_service_cache(entry, service, records)) {
                     ESP_LOGW(TAG, "Failed to notify browse, dropping sync mark");
                 }
-                service_cache_clear_sync_out(service, MDNS_CACHE_CONSUMER_BROWSE, 0);
+                service_cache_clear_sync_out(service, MDNS_CACHE_CONSUMER_BROWSE);
             }
             // TODO: When resolver is implemented, add resolver sync processing here.
         }
