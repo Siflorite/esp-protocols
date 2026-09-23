@@ -12,6 +12,7 @@
 #include "mdns_cache.h"
 #include "mdns_mem_caps.h"
 #include "mdns_private.h"
+#include "mdns_test_clock.h"
 #include "mock_mdns_pcb.h"
 #include "unity.h"
 
@@ -36,6 +37,10 @@ static const esp_ip_addr_t s_addr = ESP_IP4ADDR_INIT(192, 168, 1, 100);
 
 static size_t s_notify_calls;
 static uint32_t s_last_ttl;
+static size_t s_alpha_calls;
+static size_t s_beta_calls;
+static uint32_t s_alpha_ttl;
+static uint32_t s_beta_ttl;
 
 static esp_netif_t *test_netif(void)
 {
@@ -63,6 +68,22 @@ static void browse_callback(mdns_result_t *result)
 
     s_notify_calls++;
     s_last_ttl = result->ttl;
+}
+
+static void alpha_callback(mdns_result_t *result)
+{
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("alpha", result->subtype);
+    s_alpha_calls++;
+    s_alpha_ttl = result->ttl;
+}
+
+static void beta_callback(mdns_result_t *result)
+{
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_STRING("beta", result->subtype);
+    s_beta_calls++;
+    s_beta_ttl = result->ttl;
 }
 
 static void unexpected_callback(mdns_result_t *result)
@@ -104,7 +125,7 @@ static void cache_service_details(void)
 static void cache_service(void)
 {
     TEST_ASSERT_NOT_EQUAL(MDNS_CACHE_ERROR, mdns_priv_cache_update_ptr(test_netif(), MDNS_IP_PROTOCOL_V4,
-                                                                       INSTANCE, SERVICE, PROTO, TTL));
+                                                                       INSTANCE, SERVICE, PROTO, NULL, TTL));
     cache_service_details();
 }
 
@@ -114,6 +135,10 @@ void mdns_test_set_up(void)
     mdns_priv_cache_clear();
     s_notify_calls = 0;
     s_last_ttl = 0;
+    s_alpha_calls = 0;
+    s_beta_calls = 0;
+    s_alpha_ttl = 0;
+    s_beta_ttl = 0;
 }
 
 void mdns_test_tear_down(void)
@@ -201,7 +226,7 @@ static void test_browse_matches_service_and_requires_ptr(void)
     TEST_ASSERT_EQUAL_size_t(0, s_notify_calls);
 
     TEST_ASSERT_NOT_EQUAL(MDNS_CACHE_ERROR, mdns_priv_cache_update_ptr(test_netif(), MDNS_IP_PROTOCOL_V4,
-                                                                       INSTANCE, SERVICE, PROTO, TTL));
+                                                                       INSTANCE, SERVICE, PROTO, NULL, TTL));
     mdns_priv_cache_process_sync();
     TEST_ASSERT_EQUAL_size_t(1, s_notify_calls);
     TEST_ASSERT_EQUAL_UINT32(TTL, s_last_ttl);
@@ -218,7 +243,7 @@ static void test_browse_goodbye_and_rediscovery(void)
 
     // Cache goodbye should notify the browse.
     TEST_ASSERT_NOT_EQUAL(MDNS_CACHE_ERROR, mdns_priv_cache_update_ptr(test_netif(), MDNS_IP_PROTOCOL_V4,
-                                                                       INSTANCE, SERVICE, PROTO, 0));
+                                                                       INSTANCE, SERVICE, PROTO, NULL, 0));
     mdns_priv_cache_remove_expired_records(esp_timer_get_time());
     mdns_priv_cache_process_sync();
     TEST_ASSERT_EQUAL_size_t(2, s_notify_calls);
@@ -231,6 +256,57 @@ static void test_browse_goodbye_and_rediscovery(void)
     TEST_ASSERT_EQUAL_UINT32(TTL, s_last_ttl);
 }
 
+static void test_browse_subtype_independent_expiry(void)
+{
+    mdns_test_clock_reset();
+    TEST_ASSERT_NOT_NULL(mdns_browse_new(SERVICE, PROTO, browse_callback));
+    TEST_ASSERT_NOT_NULL(mdns_browse_new_with_subtype(SERVICE, PROTO, "alpha", alpha_callback));
+    TEST_ASSERT_NOT_NULL(mdns_browse_new_with_subtype(SERVICE, PROTO, "beta", beta_callback));
+
+    // Add subtype PTRs before SRV moves the service to its hostname cache entry.
+    TEST_ASSERT_EQUAL(MDNS_CACHE_ADDED, mdns_priv_cache_update_ptr(test_netif(), MDNS_IP_PROTOCOL_V4,
+                                                                   INSTANCE, SERVICE, PROTO, "alpha", 5));
+    TEST_ASSERT_EQUAL(MDNS_CACHE_UPDATED, mdns_priv_cache_update_ptr(test_netif(), MDNS_IP_PROTOCOL_V4,
+                                                                     INSTANCE, SERVICE, PROTO, "beta", 10));
+    cache_service_details();
+    mdns_priv_cache_process_sync();
+    TEST_ASSERT_EQUAL_size_t(0, s_notify_calls);
+    TEST_ASSERT_EQUAL_size_t(1, s_alpha_calls);
+    TEST_ASSERT_EQUAL_size_t(1, s_beta_calls);
+    TEST_ASSERT_EQUAL_UINT32(5, s_alpha_ttl);
+    TEST_ASSERT_EQUAL_UINT32(10, s_beta_ttl);
+
+    TEST_ASSERT_EQUAL(MDNS_CACHE_UPDATED, mdns_priv_cache_update_ptr(test_netif(), MDNS_IP_PROTOCOL_V4,
+                                                                     INSTANCE, SERVICE, PROTO, NULL, 20));
+    mdns_priv_cache_process_sync();
+    TEST_ASSERT_EQUAL_size_t(1, s_notify_calls);
+    TEST_ASSERT_EQUAL_size_t(1, s_alpha_calls);
+    TEST_ASSERT_EQUAL_size_t(1, s_beta_calls);
+
+    TEST_ASSERT_TRUE(mdns_test_clock_advance_us(5 * MDNS_US_PER_SEC));
+    mdns_priv_cache_remove_expired_records(esp_timer_get_time());
+    mdns_priv_cache_process_sync();
+    TEST_ASSERT_EQUAL_size_t(2, s_alpha_calls);
+    TEST_ASSERT_EQUAL_UINT32(0, s_alpha_ttl);
+    TEST_ASSERT_EQUAL_size_t(1, s_beta_calls);
+    TEST_ASSERT_EQUAL_size_t(1, s_notify_calls);
+
+    TEST_ASSERT_TRUE(mdns_test_clock_advance_us(5 * MDNS_US_PER_SEC));
+    mdns_priv_cache_remove_expired_records(esp_timer_get_time());
+    mdns_priv_cache_process_sync();
+    TEST_ASSERT_EQUAL_size_t(2, s_beta_calls);
+    TEST_ASSERT_EQUAL_UINT32(0, s_beta_ttl);
+    TEST_ASSERT_EQUAL_size_t(1, s_notify_calls);
+
+    TEST_ASSERT_TRUE(mdns_test_clock_advance_us(10 * MDNS_US_PER_SEC));
+    mdns_priv_cache_remove_expired_records(esp_timer_get_time());
+    mdns_priv_cache_process_sync();
+    TEST_ASSERT_EQUAL_size_t(2, s_notify_calls);
+    TEST_ASSERT_EQUAL_UINT32(0, s_last_ttl);
+    TEST_ASSERT_EQUAL_size_t(2, s_alpha_calls);
+    TEST_ASSERT_EQUAL_size_t(2, s_beta_calls);
+}
+
 void run_unity_tests(void)
 {
     UNITY_BEGIN();
@@ -238,5 +314,6 @@ void run_unity_tests(void)
     RUN_TEST(test_browse_cached_result_and_delete);
     RUN_TEST(test_browse_matches_service_and_requires_ptr);
     RUN_TEST(test_browse_goodbye_and_rediscovery);
+    RUN_TEST(test_browse_subtype_independent_expiry);
     UNITY_END();
 }

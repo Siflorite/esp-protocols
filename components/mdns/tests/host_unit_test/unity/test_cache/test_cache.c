@@ -73,6 +73,7 @@ typedef struct {
     char instance[MDNS_NAME_BUF_LEN];
     char service[MDNS_NAME_BUF_LEN];
     char proto[MDNS_NAME_BUF_LEN];
+    char goodbye_subtype[MDNS_NAME_BUF_LEN];
 } cache_observer_t;
 
 static cache_observer_t s_observer;
@@ -173,11 +174,12 @@ static bool browse_update_callback(const mdns_cache_entry_t *entry, const mdns_s
 }
 
 static bool browse_goodbye_callback(const mdns_cache_entry_t *entry, const mdns_service_cache_t *service,
-                                    int cmock_num_calls)
+                                    const char *subtype, int cmock_num_calls)
 {
     (void)cmock_num_calls;
     s_observer.goodbye_calls++;
     capture_cache(entry, service, 0);
+    copy_optional_string(s_observer.goodbye_subtype, sizeof(s_observer.goodbye_subtype), subtype);
     return s_observer.goodbye_result;
 }
 
@@ -256,7 +258,7 @@ static mdns_cache_update_result_t update_test_record(mdns_cache_record_type_t re
     switch (record_type) {
     case MDNS_CACHE_RECORD_PTR:
         return mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
-                                          INSTANCE, SERVICE, PROTO, goodbye ? 0 : PTR_TTL);
+                                          INSTANCE, SERVICE, PROTO, NULL, goodbye ? 0 : PTR_TTL);
     case MDNS_CACHE_RECORD_SRV:
         return mdns_priv_cache_update_srv(test_netif_a(), MDNS_IP_PROTOCOL_V4, HOSTNAME, INSTANCE,
                                           SERVICE, PROTO, SRV_PRIORITY, SRV_WEIGHT, SRV_PORT, goodbye ? 0 : SRV_TTL);
@@ -366,7 +368,7 @@ static void test_cache_ptr_add_repeat_update_remove(void)
 
     // Scenario 1: Add new PTR record
     TEST_ASSERT_EQUAL(MDNS_CACHE_ADDED, mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
-                                                                   INSTANCE, SERVICE, PROTO, PTR_TTL));
+                                                                   INSTANCE, SERVICE, PROTO, NULL, PTR_TTL));
     mdns_priv_cache_process_sync();
     TEST_ASSERT_EQUAL_size_t(1, s_observer.update_calls);
     TEST_ASSERT_EQUAL_UINT8(MDNS_CACHE_RECORD_PTR, s_observer.records);
@@ -378,20 +380,20 @@ static void test_cache_ptr_add_repeat_update_remove(void)
 
     // Scenario 2: Update the same service cache with identical PTR TTL
     TEST_ASSERT_EQUAL(MDNS_CACHE_NO_CHANGE, mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
-                                                                       INSTANCE, SERVICE, PROTO, PTR_TTL));
+                                                                       INSTANCE, SERVICE, PROTO, NULL, PTR_TTL));
     mdns_priv_cache_process_sync();
     TEST_ASSERT_EQUAL_size_t(1, s_observer.update_calls);
 
     // Scenario 3: Update the same service cache with different PTR TTL
     TEST_ASSERT_EQUAL(MDNS_CACHE_UPDATED, mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
-                                                                     INSTANCE, SERVICE, PROTO, 240));
+                                                                     INSTANCE, SERVICE, PROTO, NULL, 240));
     mdns_priv_cache_process_sync();
     TEST_ASSERT_EQUAL_size_t(2, s_observer.update_calls);
     TEST_ASSERT_EQUAL_UINT32(240, s_observer.ptr_ttl);
 
     // Scenario 4: Remove cache with PTR TTL=0
     TEST_ASSERT_EQUAL(MDNS_CACHE_UPDATED, mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
-                                                                     INSTANCE, SERVICE, PROTO, 0));
+                                                                     INSTANCE, SERVICE, PROTO, NULL, 0));
     mdns_priv_cache_remove_expired_records(esp_timer_get_time());
     mdns_priv_cache_process_sync();
     TEST_ASSERT_EQUAL_size_t(1, s_observer.goodbye_calls);
@@ -731,7 +733,7 @@ static void test_cache_expiry_extend_and_notify(void)
     // t = 60s
     TEST_ASSERT_TRUE(mdns_test_clock_advance_us(60 * MDNS_US_PER_SEC));
     TEST_ASSERT_EQUAL(MDNS_CACHE_NO_CHANGE, mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
-                                                                       INSTANCE, SERVICE, PROTO, PTR_TTL));
+                                                                       INSTANCE, SERVICE, PROTO, NULL, PTR_TTL));
     mdns_priv_cache_process_sync();
     TEST_ASSERT_EQUAL_size_t(0, s_observer.update_calls);
     TEST_ASSERT_EQUAL_size_t(0, s_observer.goodbye_calls);
@@ -835,6 +837,66 @@ static void test_cache_expiry_extend_and_notify(void)
     assert_memory(baseline);
 }
 
+static void test_cache_subtype_expiry_nodes_and_notify(void)
+{
+    mdns_priv_cache_clear();
+    mdns_test_clock_reset();
+    reset_observer();
+    size_t baseline = mdns_mem_get_allocation_counts();
+
+    TEST_ASSERT_EQUAL(MDNS_CACHE_ADDED, mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
+                                                                   INSTANCE, SERVICE, PROTO, NULL, 30));
+    size_t base_allocations = mdns_mem_get_allocation_counts();
+    TEST_ASSERT_EQUAL(MDNS_CACHE_UPDATED, mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
+                                                                     INSTANCE, SERVICE, PROTO, "alpha", 5));
+    // A subtype owns its name, cache item, and a separately allocated expiry node.
+    TEST_ASSERT_EQUAL_size_t(base_allocations + 3, mdns_mem_get_allocation_counts());
+    TEST_ASSERT_EQUAL(MDNS_CACHE_UPDATED, mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
+                                                                     INSTANCE, SERVICE, PROTO, "beta", 10));
+    mdns_priv_cache_process_sync();
+    TEST_ASSERT_EQUAL_size_t(1, s_observer.update_calls);
+    reset_observer();
+
+    TEST_ASSERT_TRUE(mdns_test_clock_advance_us(3 * MDNS_US_PER_SEC));
+    TEST_ASSERT_EQUAL(MDNS_CACHE_NO_CHANGE, mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
+                                                                       INSTANCE, SERVICE, PROTO, "alpha", 5));
+    mdns_priv_cache_process_sync();
+    TEST_ASSERT_EQUAL_size_t(0, s_observer.update_calls);
+    TEST_ASSERT_TRUE(mdns_test_clock_advance_us(2 * MDNS_US_PER_SEC));
+    mdns_priv_cache_remove_expired_records(esp_timer_get_time());
+    TEST_ASSERT_EQUAL_size_t(0, s_observer.goodbye_calls);
+    TEST_ASSERT_TRUE(mdns_test_clock_advance_us(3 * MDNS_US_PER_SEC));
+    mdns_priv_cache_remove_expired_records(esp_timer_get_time());
+    TEST_ASSERT_EQUAL_size_t(1, s_observer.goodbye_calls);
+    TEST_ASSERT_EQUAL_STRING("alpha", s_observer.goodbye_subtype);
+    TEST_ASSERT_EQUAL_size_t(base_allocations + 3, mdns_mem_get_allocation_counts());
+    TEST_ASSERT_TRUE(mdns_test_clock_advance_us(2 * MDNS_US_PER_SEC));
+    mdns_priv_cache_remove_expired_records(esp_timer_get_time());
+    TEST_ASSERT_EQUAL_size_t(2, s_observer.goodbye_calls);
+    TEST_ASSERT_EQUAL_STRING("beta", s_observer.goodbye_subtype);
+    TEST_ASSERT_EQUAL_size_t(base_allocations, mdns_mem_get_allocation_counts());
+    TEST_ASSERT_TRUE(mdns_test_clock_advance_us(20 * MDNS_US_PER_SEC));
+    mdns_priv_cache_remove_expired_records(esp_timer_get_time());
+    TEST_ASSERT_EQUAL_size_t(3, s_observer.goodbye_calls);
+    TEST_ASSERT_EQUAL_STRING("", s_observer.goodbye_subtype);
+    assert_memory(baseline);
+
+    // Base PTR and multiple subtype nodes can all expire in the same pass.
+    mdns_test_clock_reset();
+    reset_observer();
+    TEST_ASSERT_EQUAL(MDNS_CACHE_ADDED, mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
+                                                                   INSTANCE, SERVICE, PROTO, NULL, 5));
+    TEST_ASSERT_EQUAL(MDNS_CACHE_UPDATED, mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
+                                                                     INSTANCE, SERVICE, PROTO, "alpha", 5));
+    TEST_ASSERT_EQUAL(MDNS_CACHE_UPDATED, mdns_priv_cache_update_ptr(test_netif_a(), MDNS_IP_PROTOCOL_V4,
+                                                                     INSTANCE, SERVICE, PROTO, "beta", 5));
+    mdns_priv_cache_process_sync();
+    TEST_ASSERT_TRUE(mdns_test_clock_advance_us(5 * MDNS_US_PER_SEC));
+    mdns_priv_cache_remove_expired_records(esp_timer_get_time());
+    TEST_ASSERT_EQUAL_size_t(3, s_observer.goodbye_calls);
+    assert_memory(baseline);
+}
+
 void run_unity_tests(void)
 {
     UNITY_BEGIN();
@@ -845,5 +907,6 @@ void run_unity_tests(void)
     RUN_TEST(test_cache_record_order_and_result_projection);
     RUN_TEST(test_cache_service_record_goodbyes);
     RUN_TEST(test_cache_expiry_extend_and_notify);
+    RUN_TEST(test_cache_subtype_expiry_nodes_and_notify);
     UNITY_END();
 }
