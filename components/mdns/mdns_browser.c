@@ -19,10 +19,23 @@
 #define MDNS_CACHE_RECORD_BROWSE_SHARED (mdns_cache_record_mask_t) \
                                         (MDNS_CACHE_RECORD_SRV | MDNS_CACHE_RECORD_TXT | MDNS_CACHE_RECORD_ADDR)
 #define MDNS_SUBTYPE_MAX_LEN 63
+#define MDNS_BROWSE_RETRY_INITIAL_US 1000000LL
+#define MDNS_BROWSE_RETRY_MAX_US (3600 * MDNS_BROWSE_RETRY_INITIAL_US)
 
 static const char *TAG = "mdns_browser";
 
 static mdns_browse_t *s_browse;
+static int64_t s_next_retry_us;
+
+/**
+ * @brief Update @ref s_next_retry_us
+ */
+static void update_retry_due(int64_t due_us)
+{
+    if (s_next_retry_us > 0 || due_us < s_next_retry_us) {
+        s_next_retry_us = due_us;
+    }
+}
 
 /**
  * @brief  Browse action
@@ -92,6 +105,7 @@ void mdns_priv_browse_send_by_ip_protocol(mdns_if_t mdns_if, mdns_ip_protocol_t 
 
 void mdns_priv_browse_free(void)
 {
+    s_next_retry_us = 0;
     while (s_browse) {
         mdns_browse_t *b = s_browse;
         s_browse = s_browse->next;
@@ -212,17 +226,59 @@ static mdns_browse_t *browse_init(const char *service, const char *proto, const 
 /**
  * @brief  Send initial PTR queries for a registered browse.
  */
+static void browse_send_all(mdns_browse_t *browse)
+{
+    for (uint8_t interface_idx = 0; interface_idx < MDNS_MAX_INTERFACES; interface_idx++) {
+        for (uint8_t protocol_idx = 0; protocol_idx < MDNS_IP_PROTOCOL_MAX; protocol_idx++) {
+            browse_send(browse, (mdns_if_t) interface_idx, (mdns_ip_protocol_t) protocol_idx);
+        }
+    }
+}
+
+/**
+ * @brief  Set a new browse to running state and schedule retry query.
+ */
 static void browse_start(mdns_browse_t *browse)
 {
     if (!browse || browse->state != BROWSE_INIT) {
         return;
     }
     browse->state = BROWSE_RUNNING;
+
+    if (browse->notifier) {
+        browse->retry_interval_us = MDNS_BROWSE_RETRY_INITIAL_US;
+        browse->retry_due_us = esp_timer_get_time() + browse->retry_interval_us;
+    }
+
     mdns_priv_cache_notify_browse(browse);
-    for (uint8_t interface_idx = 0; interface_idx < MDNS_MAX_INTERFACES; interface_idx++) {
-        for (uint8_t protocol_idx = 0; protocol_idx < MDNS_IP_PROTOCOL_MAX; protocol_idx++) {
-            browse_send(browse, (mdns_if_t) interface_idx, (mdns_ip_protocol_t) protocol_idx);
+    browse_send_all(browse);
+
+    if (browse->retry_due_us > 0) {
+        update_retry_due(browse->retry_due_us);
+    }
+}
+
+void mdns_priv_browse_retry_due(int64_t now_us)
+{
+    if (s_next_retry_us == 0 || now_us < s_next_retry_us) {
+        return;
+    }
+    s_next_retry_us = 0;
+
+    for (mdns_browse_t *b = s_browse; b; b = b->next) {
+        if (b->state != BROWSE_RUNNING || b->retry_due_us == 0) {
+            continue;
         }
+
+        if (now_us >= b->retry_due_us) {
+            browse_send_all(b);
+            b->retry_interval_us *= 2;
+            if (b->retry_interval_us > MDNS_BROWSE_RETRY_MAX_US) {
+                b->retry_interval_us = MDNS_BROWSE_RETRY_MAX_US;
+            }
+            b->retry_due_us = now_us + b->retry_interval_us;
+        }
+        update_retry_due(b->retry_due_us);
     }
 }
 
@@ -396,6 +452,7 @@ bool mdns_priv_browse_update_from_service_cache(const mdns_cache_entry_t *entry,
         if (!browse_need_update(browse, service, subtype, records)) {
             continue;
         }
+        browse->retry_due_us = 0;
         updated &= browse_build_and_notify_temp_result(browse, entry, service, subtype, false);
     }
 
@@ -415,6 +472,7 @@ bool mdns_priv_browse_notify_from_service_cache(const mdns_cache_entry_t *entry,
         return true;
     }
 
+    browse->retry_due_us = 0;
     return browse_build_and_notify_temp_result(browse, entry, service, subtype, false);
 }
 
